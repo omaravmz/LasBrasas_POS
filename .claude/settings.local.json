@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm config *)",
+      "Bash(npm --version)",
+      "PowerShell(pnpm *)",
+      "PowerShell(New-Item *)",
+      "PowerShell(pnpm install *)",
+      "PowerShell(pnpm config *)",
+      "PowerShell(pnpm db:generate *)",
+      "PowerShell(pnpm db:migrate *)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; $env:NODE_TLS_REJECT_UNAUTHORIZED = \"0\"; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx prisma migrate dev --name init 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; $env:NODE_TLS_REJECT_UNAUTHORIZED = \"0\"; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx prisma db push 2>&1)",
+      "PowerShell(Out-File *)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; $env:NODE_TLS_REJECT_UNAUTHORIZED = \"0\"; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx prisma db seed 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx tsc --noEmit 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; $env:NODE_TLS_REJECT_UNAUTHORIZED = \"0\"; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; Start-Process -NoNewWindow -FilePath \"node\" -ArgumentList \"--import tsx/esm src/index.ts\" -PassThru; Start-Sleep -Seconds 4; Invoke-RestMethod -Uri \"http://localhost:3000/api/health\" | ConvertTo-Json)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\pos\"; npx tsc --noEmit 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\packages\\\\shared\"; npx tsc 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; $env:NODE_TLS_REJECT_UNAUTHORIZED = \"0\"; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx tsx src/scripts/updateSucursales.ts 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx vitest run 2>&1)",
+      "PowerShell($env:PATH = \"C:\\\\Users\\\\oam01\\\\AppData\\\\Local\\\\pnpm\\\\bin;\" + $env:PATH; Set-Location \"D:\\\\proyectos\\\\punto_venta_brasas\\\\apps\\\\backend\"; npx tsx src/impresora/generarEjemplo.ts 2>&1)",
+      "PowerShell($PROFILE)",
+      "Skill(update-config)",
+      "Bash(npx tsc *)",
+      "Bash(npx vitest *)"
+    ],
+    "defaultMode": "acceptEdits"
+  }
+}

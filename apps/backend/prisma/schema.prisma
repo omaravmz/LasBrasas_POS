@@ -1,0 +1,377 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum RolUsuario {
+  DUENO
+  ADMIN
+}
+
+enum OrigenPedido {
+  MOSTRADOR
+  TELEFONO
+  WHATSAPP
+  DELIVERY
+}
+
+enum EstadoPedido {
+  PENDIENTE
+  LISTO
+  ENTREGADO
+  CANCELADO
+}
+
+enum MetodoPago {
+  EFECTIVO
+  TARJETA
+  TRANSFERENCIA
+}
+
+enum EstadoTraslado {
+  PENDIENTE
+  CONFIRMADO
+  CANCELADO
+}
+
+enum Unidad {
+  KG
+  GR
+  LT
+  ML
+  PIEZA
+}
+
+enum TipoInsumo {
+  CARNE
+  POLLO
+  CONSUMIBLE
+  BEBIDA
+  COMPLEMENTO
+}
+
+// ---------------------------------------------------------------------------
+// Organización
+// ---------------------------------------------------------------------------
+
+model Sucursal {
+  id     String @id @default(uuid())
+  nombre String
+
+  dispositivos      Dispositivo[]
+  pedidos           Pedido[]
+  inventarioInsumos InventarioInsumo[]
+  trasladosOrigen   Traslado[]             @relation("TrasladoOrigen")
+  trasladosDestino  Traslado[]             @relation("TrasladoDestino")
+  transformaciones  TransformacionInsumo[]
+  consumosEmpleado  ConsumoEmpleado[]
+  cierresDia        CierreDia[]
+  aperturasDia      AperturaDia[]
+}
+
+model Dispositivo {
+  id         String  @id @default(uuid())
+  sucursalId String
+  nombre     String
+  token      String  @unique
+  activo     Boolean @default(true)
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  pedidos  Pedido[]
+}
+
+model Usuario {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  nombre       String
+  rol          RolUsuario @default(DUENO)
+}
+
+// ---------------------------------------------------------------------------
+// Catálogo / Menú
+// ---------------------------------------------------------------------------
+
+model Categoria {
+  id     String @id @default(uuid())
+  nombre String
+  orden  Int
+
+  productos Producto[]
+}
+
+model Producto {
+  id            String  @id @default(uuid())
+  categoriaId   String
+  nombre        String
+  descripcion   String?
+  precio        Decimal @db.Decimal(10, 2)
+  activo        Boolean @default(true)
+  requiereCorte Boolean @default(false)
+  gramosBase    Int?
+  orden         Int
+
+  categoria   Categoria          @relation(fields: [categoriaId], references: [id])
+  variantes   ProductoVariante[]
+  receta      Receta?
+  itemsPedido ItemPedido[]
+  consumos    ConsumoEmpleado[]
+}
+
+model ProductoVariante {
+  id          String  @id @default(uuid())
+  productoId  String
+  nombre      String
+  grupoPrecio Int?
+  activo      Boolean @default(true)
+
+  producto    Producto            @relation(fields: [productoId], references: [id])
+  selecciones SeleccionVariante[]
+}
+
+// ---------------------------------------------------------------------------
+// Inventario: Insumos y Recetas
+// ---------------------------------------------------------------------------
+
+model Insumo {
+  id               String   @id @default(uuid())
+  nombre           String
+  unidad           Unidad
+  tipo             TipoInsumo
+  esDiario         Boolean  @default(false)
+  rendimientoBolsa Decimal? @db.Decimal(10, 3)
+
+  ingredientesReceta      IngredienteReceta[]
+  inventarios             InventarioInsumo[]
+  transformacionesOrigen  TransformacionInsumo[] @relation("InsumoOrigen")
+  transformacionesDestino TransformacionInsumo[] @relation("InsumoDestino")
+  traslados               Traslado[]
+  bolsasSobrantes         BolsaSobrante[]
+}
+
+model InventarioInsumo {
+  id               String   @id @default(uuid())
+  sucursalId       String
+  insumoId         String
+  cantidad         Decimal  @db.Decimal(10, 3)
+  umbralAlerta     Decimal? @db.Decimal(10, 3)
+  ultimoMovimiento DateTime @default(now())
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  insumo   Insumo   @relation(fields: [insumoId], references: [id])
+
+  @@unique([sucursalId, insumoId])
+}
+
+model Receta {
+  id         String @id @default(uuid())
+  productoId String @unique
+
+  producto     Producto            @relation(fields: [productoId], references: [id])
+  ingredientes IngredienteReceta[]
+}
+
+model IngredienteReceta {
+  id         String  @id @default(uuid())
+  recetaId   String
+  insumoId   String
+  cantidad   Decimal @db.Decimal(10, 3)
+  esVariable Boolean @default(false)
+
+  receta Receta @relation(fields: [recetaId], references: [id])
+  insumo Insumo @relation(fields: [insumoId], references: [id])
+}
+
+model TransformacionInsumo {
+  id              String   @id @default(uuid())
+  sucursalId      String
+  insumoOrigenId  String
+  insumoDestinoId String
+  cantidadOrigen  Decimal  @db.Decimal(10, 3)
+  cantidadDestino Decimal  @db.Decimal(10, 3)
+  tanda           Int?
+  fecha           DateTime @default(now())
+  notas           String?
+
+  sucursal      Sucursal @relation(fields: [sucursalId], references: [id])
+  insumoOrigen  Insumo   @relation("InsumoOrigen", fields: [insumoOrigenId], references: [id])
+  insumoDestino Insumo   @relation("InsumoDestino", fields: [insumoDestinoId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Clientes
+// ---------------------------------------------------------------------------
+
+model Cliente {
+  id       String   @id @default(uuid())
+  telefono String   @unique
+  nombre   String?
+  creadoEn DateTime @default(now())
+
+  direcciones DireccionCliente[]
+  pedidos     Pedido[]
+}
+
+model DireccionCliente {
+  id          String  @id @default(uuid())
+  clienteId   String
+  direccion   String
+  referencia  String?
+  esPrincipal Boolean @default(false)
+
+  cliente Cliente @relation(fields: [clienteId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Pedidos
+// ---------------------------------------------------------------------------
+
+model Pedido {
+  id              String       @id @default(uuid())
+  folio           Int
+  sucursalId      String
+  dispositivoId   String?
+  clienteId       String?
+  origen          OrigenPedido
+  estado          EstadoPedido @default(PENDIENTE)
+  metodoPago      MetodoPago?
+  total           Decimal      @db.Decimal(10, 2)
+  horaRecoleccion DateTime?
+  horaInicioPrep  DateTime?
+  reembolsado     Boolean      @default(false)
+  montoReembolso  Decimal?     @db.Decimal(10, 2)
+  fechaReembolso  DateTime?
+  notas           String?
+  creadoEn        DateTime     @default(now())
+  actualizadoEn   DateTime     @updatedAt
+
+  sucursal    Sucursal     @relation(fields: [sucursalId], references: [id])
+  dispositivo Dispositivo? @relation(fields: [dispositivoId], references: [id])
+  cliente     Cliente?     @relation(fields: [clienteId], references: [id])
+  items       ItemPedido[]
+}
+
+model ItemPedido {
+  id             String  @id @default(uuid())
+  pedidoId       String
+  productoId     String
+  cantidad       Int
+  precioUnitario Decimal @db.Decimal(10, 2)
+  notas          String?
+
+  pedido      Pedido              @relation(fields: [pedidoId], references: [id])
+  producto    Producto            @relation(fields: [productoId], references: [id])
+  selecciones SeleccionVariante[]
+}
+
+model SeleccionVariante {
+  id           String  @id @default(uuid())
+  itemPedidoId String
+  varianteId   String
+  proporcion   Decimal @db.Decimal(4, 3) @default(1.000)
+
+  itemPedido ItemPedido       @relation(fields: [itemPedidoId], references: [id])
+  variante   ProductoVariante @relation(fields: [varianteId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Traslados entre sucursales
+// ---------------------------------------------------------------------------
+
+model Traslado {
+  id           String         @id @default(uuid())
+  origenId     String
+  destinoId    String
+  insumoId     String
+  cantidad     Decimal        @db.Decimal(10, 3)
+  estado       EstadoTraslado @default(PENDIENTE)
+  solicitadoEn DateTime       @default(now())
+  confirmadoEn DateTime?
+  notas        String?
+
+  origen  Sucursal @relation("TrasladoOrigen", fields: [origenId], references: [id])
+  destino Sucursal @relation("TrasladoDestino", fields: [destinoId], references: [id])
+  insumo  Insumo   @relation(fields: [insumoId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Operación diaria
+// ---------------------------------------------------------------------------
+
+model AperturaDia {
+  id           String   @id @default(uuid())
+  sucursalId   String
+  fecha        DateTime @db.Date
+  fondoInicial Decimal  @db.Decimal(10, 2)
+  notas        String?
+  abiertoEn    DateTime @default(now())
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+
+  @@unique([sucursalId, fecha])
+}
+
+model CierreDia {
+  id                 String   @id @default(uuid())
+  sucursalId         String
+  fecha              DateTime @db.Date
+  fondoInicial       Decimal  @db.Decimal(10, 2)
+  ventasEfectivo     Decimal  @db.Decimal(10, 2)
+  ventasTarjeta      Decimal  @db.Decimal(10, 2)
+  ventasTransfer     Decimal  @db.Decimal(10, 2)
+  totalVentas        Decimal  @db.Decimal(10, 2)
+  reembolsosEfectivo Decimal  @db.Decimal(10, 2) @default(0)
+  conteoFisico       Decimal  @db.Decimal(10, 2)
+  diferencia         Decimal  @db.Decimal(10, 2)
+  mermaPollo         Int?
+  notas              String?
+  cerradoEn          DateTime @default(now())
+
+  sucursal        Sucursal        @relation(fields: [sucursalId], references: [id])
+  gastos          GastoDia[]
+  bolsasSobrantes BolsaSobrante[]
+
+  @@unique([sucursalId, fecha])
+}
+
+model GastoDia {
+  id          String   @id @default(uuid())
+  cierreDiaId String
+  concepto    String
+  monto       Decimal  @db.Decimal(10, 2)
+  fotoTicket  String?
+  creadoEn    DateTime @default(now())
+
+  cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])
+}
+
+model BolsaSobrante {
+  id          String  @id @default(uuid())
+  cierreDiaId String
+  insumoId    String
+  peso        Decimal @db.Decimal(6, 3)
+
+  cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])
+  insumo    Insumo    @relation(fields: [insumoId], references: [id])
+}
+
+model ConsumoEmpleado {
+  id         String   @id @default(uuid())
+  sucursalId String
+  productoId String
+  cantidad   Int      @default(1)
+  fecha      DateTime @default(now())
+  notas      String?
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  producto Producto @relation(fields: [productoId], references: [id])
+}
