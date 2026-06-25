@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import type { Decimal } from "@prisma/client/runtime/library.js";
 import type { MetodoPago, OrigenPedido, Pedido } from "@prisma/client";
 
 export interface SeleccionInput {
@@ -27,6 +28,35 @@ export interface CrearPedidoInput {
   total: number;
   notas?: string;
   items: ItemPedidoInput[];
+}
+
+export interface CancelarPedidoInput {
+  id: string;
+  metodoPago: MetodoPago | null;
+  total: Decimal;
+}
+
+export async function cancelarPedido(input: CancelarPedidoInput): Promise<Pedido> {
+  const estabaCobrado = input.metodoPago !== null;
+
+  return prisma.$transaction(async (tx) => {
+    const actualizado = await tx.pedido.update({
+      where: { id: input.id },
+      data: {
+        estado: "CANCELADO",
+        ...(estabaCobrado && {
+          reembolsado: true,
+          montoReembolso: input.total,
+          fechaReembolso: new Date(),
+        }),
+      },
+    });
+
+    // Punto de extensión M2.2: revertir descuento de inventario por receta
+    // await revertirInventarioPorPedido(tx, input.id);
+
+    return actualizado;
+  });
 }
 
 export async function crearPedido(input: CrearPedidoInput): Promise<Pedido> {

@@ -1,6 +1,6 @@
-import { getDB, setConfig, getConfig } from "../db/index.js";
+import { getLocalDB } from "../db/db.js";
 import { apiFetch } from "../lib/api.js";
-import type { CategoriaLocal, ProductoLocal } from "../db/schema.js";
+import type { CategoriaLocal, ProductoLocal } from "../db/types.js";
 
 interface CatalogResponse {
   categorias: CategoriaLocal[];
@@ -13,41 +13,28 @@ interface CatalogResponse {
 
 export async function syncCatalog(): Promise<void> {
   const data = await apiFetch<CatalogResponse>("/catalog");
+  const db = await getLocalDB();
 
-  const db = await getDB();
-  const tx = db.transaction(["categorias", "productos", "config"], "readwrite");
-
-  // Limpiar y repoblar categorías
-  await tx.objectStore("categorias").clear();
-  for (const cat of data.categorias) {
-    await tx.objectStore("categorias").put(cat);
-  }
-
-  // Limpiar y repoblar productos
-  await tx.objectStore("productos").clear();
-  for (const prod of data.productos) {
-    await tx.objectStore("productos").put(prod);
-  }
-
-  await tx.done;
-  await setConfig("catalog_synced_at", data.syncedAt);
-  await setConfig("sucursal_id", data.sucursalId);
-  await setConfig("sucursal_nombre", data.sucursalNombre);
-  await setConfig("dispositivo_id", data.dispositivoId);
+  await db.guardarCatalogo(data.categorias, data.productos);
+  await db.setConfig("catalog_synced_at", data.syncedAt);
+  await db.setConfig("sucursal_id", data.sucursalId);
+  await db.setConfig("sucursal_nombre", data.sucursalNombre);
+  await db.setConfig("dispositivo_id", data.dispositivoId);
 }
 
 export async function getLastSyncTime(): Promise<string | null> {
-  return getConfig("catalog_synced_at");
+  const db = await getLocalDB();
+  return db.getConfig("catalog_synced_at");
 }
 
 export async function getCatalogFromDB(): Promise<{
   categorias: CategoriaLocal[];
   productos: ProductoLocal[];
 }> {
-  const db = await getDB();
+  const db = await getLocalDB();
   const [categorias, productos] = await Promise.all([
-    db.getAllFromIndex("categorias", "por_orden"),
-    db.getAllFromIndex("productos", "por_orden"),
+    db.getCategorias(),
+    db.getProductos(),
   ]);
   return { categorias, productos };
 }

@@ -1,17 +1,17 @@
-import { getConfig, setConfig } from "../db/index.js";
+import { getLocalDB } from "../db/db.js";
 
 interface FolioState {
   fecha: string; // YYYY-MM-DD
   ultimo: number;
 }
 
-// Retorna la fecha local en formato YYYY-MM-DD (zona America/Mazatlan)
 function hoyLocal(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Mazatlan" });
 }
 
 async function leerEstado(): Promise<FolioState> {
-  const raw = await getConfig("folio_dia");
+  const db = await getLocalDB();
+  const raw = await db.getConfig("folio_dia");
   if (!raw) return { fecha: "", ultimo: 0 };
   try {
     return JSON.parse(raw) as FolioState;
@@ -20,18 +20,17 @@ async function leerEstado(): Promise<FolioState> {
   }
 }
 
-// Retorna el próximo folio sin modificar el contador
 export async function peekFolio(): Promise<number> {
   const estado = await leerEstado();
   const hoy = hoyLocal();
   return estado.fecha === hoy ? estado.ultimo + 1 : 1;
 }
 
-// Atomically incrementa y persiste el contador, retornando el folio asignado
 export async function avanzarFolio(): Promise<number> {
+  const db = await getLocalDB();
   const estado = await leerEstado();
   const hoy = hoyLocal();
   const nuevo = estado.fecha === hoy ? estado.ultimo + 1 : 1;
-  await setConfig("folio_dia", JSON.stringify({ fecha: hoy, ultimo: nuevo }));
+  await db.setConfig("folio_dia", JSON.stringify({ fecha: hoy, ultimo: nuevo }));
   return nuevo;
 }

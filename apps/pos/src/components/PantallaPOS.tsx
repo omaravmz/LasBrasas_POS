@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getCatalogFromDB } from "../sync/catalogSync.js";
-import { getDB, getConfig } from "../db/index.js";
-import type { CategoriaLocal, ProductoLocal } from "../db/schema.js";
+import { getLocalDB } from "../db/db.js";
+import type { CategoriaLocal, ProductoLocal } from "../db/types.js";
 import { ConfiguradorCortes } from "./ConfiguradorCortes.js";
 import { ConfiguradorRapido } from "./ConfiguradorRapido.js";
 import { EditarNota } from "./EditarNota.js";
@@ -12,6 +12,11 @@ import { MetodoPago, OrigenPedido, EstadoPedido } from "@brasas/shared";
 import { peekFolio, avanzarFolio } from "../services/folio.js";
 import { guardarPedido, sincronizarPedido } from "../services/pedidoService.js";
 import { buildDatosImpresion, dispararImpresion } from "../services/print.js";
+import { useOnlineStatus } from "../hooks/useOnlineStatus.js";
+import { VistaPedidos } from "./VistaPedidos.js";
+import { BuscadorCliente } from "./BuscadorCliente.js";
+import { VistaCaja } from "./VistaCaja.js";
+import type { ClienteBasico } from "../services/clienteService.js";
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -22,6 +27,8 @@ type ModalState =
   | { tipo: "rapido"; producto: ProductoLocal; variante?: "aderezo" | "torta" }
   | { tipo: "nota"; item: ItemBorrador }
   | { tipo: "ticket" }
+  | { tipo: "cliente" }
+  | { tipo: "caja" }
   | null;
 
 // ---------------------------------------------------------------------------
@@ -30,15 +37,15 @@ type ModalState =
 const CLAVE_DISP = "variant_disponible_overrides";
 
 async function leerOverrides(): Promise<Record<string, boolean>> {
-  const db = await getDB();
-  const cfg = await db.get("config", CLAVE_DISP);
-  if (!cfg) return {};
-  try { return JSON.parse(cfg.valor) as Record<string, boolean>; } catch { return {}; }
+  const db = await getLocalDB();
+  const raw = await db.getConfig(CLAVE_DISP);
+  if (!raw) return {};
+  try { return JSON.parse(raw) as Record<string, boolean>; } catch { return {}; }
 }
 
 async function guardarOverrides(ov: Record<string, boolean>): Promise<void> {
-  const db = await getDB();
-  await db.put("config", { clave: CLAVE_DISP, valor: JSON.stringify(ov) });
+  const db = await getLocalDB();
+  await db.setConfig(CLAVE_DISP, JSON.stringify(ov));
 }
 
 function fmt(n: number) {
@@ -84,18 +91,21 @@ export function PantallaPOS() {
   const [folio, setFolio] = useState(1);
   const [sucursalId, setSucursalId] = useState("");
   const [sucursalNombre, setSucursalNombre] = useState("Sucursal");
-  const [online] = useState(navigator.onLine);
+  const [vistaActiva, setVistaActiva] = useState<"venta" | "pedidos">("venta");
+  const [clienteSeleccionado, setClienteSeleccionado] = useState<ClienteBasico | null>(null);
+  const online = useOnlineStatus();
   const scale = useScale();
 
   useEffect(() => { void cargar(); }, []);
 
   async function cargar() {
+    const db = await getLocalDB();
     const [{ categorias: cats, productos: prods }, ovs, nextFolio, sid, snombre] = await Promise.all([
       getCatalogFromDB(),
       leerOverrides(),
       peekFolio(),
-      getConfig("sucursal_id"),
-      getConfig("sucursal_nombre"),
+      db.getConfig("sucursal_id"),
+      db.getConfig("sucursal_nombre"),
     ]);
     setCategorias(cats);
     setProductos(prods);
@@ -189,6 +199,7 @@ export function PantallaPOS() {
       id: crypto.randomUUID(),
       folio: folioAsignado,
       sucursalId,
+      ...(clienteSeleccionado !== null && { clienteId: clienteSeleccionado.id }),
       origen: OrigenPedido.MOSTRADOR,
       estado: EstadoPedido.PENDIENTE,
       metodoPago,
@@ -223,6 +234,7 @@ export function PantallaPOS() {
     void dispararImpresion(datosImpresion);
 
     setBorrador([]);
+    setClienteSeleccionado(null);
     setFolio(await peekFolio());
     setModal(null);
   }
@@ -261,6 +273,58 @@ export function PantallaPOS() {
               onClick={() => setModoDisp((v) => !v)}
             >
               {modoDisp ? "✓ Disponibilidad" : "Disponibilidad"}
+            </button>
+            {/* Badge de cliente seleccionado */}
+            {clienteSeleccionado !== null ? (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "4px 10px 4px 8px", borderRadius: 8,
+                border: "1px solid var(--ok)",
+                background: "color-mix(in srgb, var(--ok) 10%, var(--surface))",
+                cursor: "pointer", fontSize: 13,
+              }} onClick={() => setModal({ tipo: "cliente" })}>
+                <span style={{ fontSize: 10 }}>👤</span>
+                <span style={{ fontWeight: 600, color: "var(--ok)", maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {clienteSeleccionado.nombre ?? clienteSeleccionado.telefono}
+                </span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setClienteSeleccionado(null); }}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-3)", padding: 0, fontSize: 12 }}
+                >✕</button>
+              </div>
+            ) : (
+              <button
+                style={{
+                  background: "transparent", border: "1px solid var(--border)",
+                  color: "var(--text-2)", borderRadius: 8, padding: "6px 12px",
+                  fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)",
+                }}
+                onClick={() => setModal({ tipo: "cliente" })}
+              >
+                Cliente
+              </button>
+            )}
+            <button
+              style={{
+                background: "transparent", border: "1px solid var(--border)",
+                color: "var(--text-2)", borderRadius: 8, padding: "6px 12px",
+                fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)",
+              }}
+              onClick={() => setModal({ tipo: "caja" })}
+            >
+              Caja
+            </button>
+            <button
+              style={{
+                background: "transparent",
+                border: "1px solid var(--border)",
+                color: "var(--text-2)",
+                borderRadius: 8, padding: "6px 14px", fontSize: 13,
+                fontWeight: 600, cursor: "pointer", fontFamily: "var(--font)",
+              }}
+              onClick={() => setVistaActiva("pedidos")}
+            >
+              Pedidos →
             </button>
           </div>
         </header>
@@ -440,6 +504,28 @@ export function PantallaPOS() {
             sucursal={sucursalNombre}
             onCerrar={() => setModal(null)}
             onConfirmar={(mp) => void confirmarCobro(mp)}
+          />
+        )}
+
+        {modal?.tipo === "cliente" && (
+          <BuscadorCliente
+            onSeleccionar={(c) => { setClienteSeleccionado(c); setModal(null); }}
+            onCerrar={() => setModal(null)}
+          />
+        )}
+
+        {modal?.tipo === "caja" && (
+          <VistaCaja
+            sucursalNombre={sucursalNombre}
+            onCerrar={() => setModal(null)}
+          />
+        )}
+
+        {vistaActiva === "pedidos" && (
+          <VistaPedidos
+            sucursalId={sucursalId}
+            sucursalNombre={sucursalNombre}
+            onVolver={() => setVistaActiva("venta")}
           />
         )}
       </div>
