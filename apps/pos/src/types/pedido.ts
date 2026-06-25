@@ -1,4 +1,4 @@
-import type { ProductoLocal, VarianteLocal } from "../db/schema.js";
+import type { ProductoLocal, VarianteLocal } from "../db/types.js";
 
 // Item en construcción (antes de persistir)
 export interface ItemBorrador {

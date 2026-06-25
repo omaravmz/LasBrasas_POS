@@ -1,31 +1,39 @@
-import { getDB } from "../db/index.js";
+import { getLocalDB } from "../db/db.js";
 import { apiFetch } from "../lib/api.js";
-import type { PedidoLocal } from "../db/schema.js";
+import type { PedidoLocal } from "../db/types.js";
 
 export async function guardarPedido(pedido: PedidoLocal): Promise<void> {
-  const db = await getDB();
-  await db.put("pedidos", pedido);
+  const db = await getLocalDB();
+  await db.guardarPedido(pedido);
 }
 
-// Best-effort: si falla (offline o error), el pedido queda en IndexedDB para
-// ser sincronizado en M1.4 cuando haya reconexión
 export async function sincronizarPedido(pedido: PedidoLocal): Promise<void> {
   try {
-    await apiFetch<unknown>("/pedidos", {
-      method: "POST",
-      body: JSON.stringify({
-        id: pedido.id,
-        folio: pedido.folio,
-        origen: pedido.origen,
-        metodoPago: pedido.metodoPago,
-        total: pedido.total,
-        notas: pedido.notas,
-        items: pedido.items,
-      }),
-    });
-    const db = await getDB();
-    await db.put("pedidos", { ...pedido, sincronizado: true });
+    const resultado = await apiFetch<{ sincronizados: string[]; errores: unknown[] }>(
+      "/sync/pedidos",
+      {
+        method: "POST",
+        body: JSON.stringify({ pedidos: [buildPayload(pedido)] }),
+      },
+    );
+    if (resultado.sincronizados.includes(pedido.id)) {
+      const db = await getLocalDB();
+      await db.marcarSincronizados([pedido.id]);
+    }
   } catch {
-    // Offline o error de red — se reintentará en M1.4
+    // Offline o error de red — se reintentará al reconectar
   }
+}
+
+export function buildPayload(pedido: PedidoLocal) {
+  return {
+    id: pedido.id,
+    folio: pedido.folio,
+    origen: pedido.origen,
+    metodoPago: pedido.metodoPago,
+    total: pedido.total,
+    ...(pedido.clienteId !== undefined && { clienteId: pedido.clienteId }),
+    ...(pedido.notas !== undefined && { notas: pedido.notas }),
+    items: pedido.items,
+  };
 }

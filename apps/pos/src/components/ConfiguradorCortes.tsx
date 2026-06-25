@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ProductoLocal, VarianteLocal } from "../db/schema.js";
+import type { ProductoLocal, VarianteLocal } from "../db/types.js";
 import { distribuirProporciones, type CorteBorrador } from "../types/pedido.js";
 import { IcoClose, IcoCheck } from "./Iconos.js";
 

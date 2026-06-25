@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ProductoLocal } from "../db/schema.js";
+import type { ProductoLocal } from "../db/types.js";
 import { IcoClose, IcoCheck } from "./Iconos.js";
 
 interface Opcion { id: string; label: string; sub?: string }
