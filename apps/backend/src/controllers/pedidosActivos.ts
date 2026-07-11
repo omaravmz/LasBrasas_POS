@@ -35,6 +35,8 @@ export async function getPedidosActivos(
         estado: p.estado,
         origen: p.origen,
         total: Number(p.total),
+        ...(p.notas !== null && { notas: p.notas }),
+        ...(p.horaRecoleccion !== null && { horaRecoleccion: p.horaRecoleccion.toISOString() }),
         creadoEn: p.creadoEn.toISOString(),
         items: p.items.map((i) => ({
           id: i.id,

@@ -34,6 +34,7 @@ export function buildPayload(pedido: PedidoLocal) {
     total: pedido.total,
     ...(pedido.clienteId !== undefined && { clienteId: pedido.clienteId }),
     ...(pedido.notas !== undefined && { notas: pedido.notas }),
+    ...(pedido.horaRecoleccion !== undefined && { horaRecoleccion: pedido.horaRecoleccion }),
     items: pedido.items,
   };
 }

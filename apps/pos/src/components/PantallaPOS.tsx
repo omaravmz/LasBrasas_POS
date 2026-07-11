@@ -3,6 +3,8 @@ import { getCatalogFromDB } from "../sync/catalogSync.js";
 import { getLocalDB } from "../db/db.js";
 import type { CategoriaLocal, ProductoLocal } from "../db/types.js";
 import { ConfiguradorCortes } from "./ConfiguradorCortes.js";
+import { ConfiguradorDisponibilidad } from "./ConfiguradorDisponibilidad.js";
+import { ConfiguradorPollo } from "./ConfiguradorPollo.js";
 import { ConfiguradorRapido } from "./ConfiguradorRapido.js";
 import { EditarNota } from "./EditarNota.js";
 import { VistaPreviewTicket } from "./VistaPreviewTicket.js";
@@ -11,24 +13,24 @@ import { type BorradorPedido, type ItemBorrador, type CorteBorrador } from "../t
 import { MetodoPago, OrigenPedido, EstadoPedido } from "@brasas/shared";
 import { peekFolio, avanzarFolio } from "../services/folio.js";
 import { guardarPedido, sincronizarPedido } from "../services/pedidoService.js";
-import { buildDatosImpresion, dispararImpresion } from "../services/print.js";
+import { buildDatosImpresion, dispararImpresion, type TipoEntrega } from "../services/print.js";
 import { useOnlineStatus } from "../hooks/useOnlineStatus.js";
 import { VistaPedidos } from "./VistaPedidos.js";
-import { BuscadorCliente } from "./BuscadorCliente.js";
 import { VistaCaja } from "./VistaCaja.js";
-import type { ClienteBasico } from "../services/clienteService.js";
+import type { OpcionesPedido } from "./VistaPreviewTicket.js";
 
 // ---------------------------------------------------------------------------
 // Tipos
 // ---------------------------------------------------------------------------
-type ProductoKind = "meat" | "aderezo" | "torta" | "quick";
+type ProductoKind = "meat" | "aderezo" | "torta" | "pollo" | "quick";
 type ModalState =
   | { tipo: "cortes"; producto: ProductoLocal }
   | { tipo: "rapido"; producto: ProductoLocal; variante?: "aderezo" | "torta" }
+  | { tipo: "pollo"; producto: ProductoLocal }
   | { tipo: "nota"; item: ItemBorrador }
   | { tipo: "ticket" }
-  | { tipo: "cliente" }
   | { tipo: "caja" }
+  | { tipo: "disponibilidad" }
   | null;
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,7 @@ function detectarKind(producto: ProductoLocal, cat?: CategoriaLocal): ProductoKi
   const n = cat?.nombre.toLowerCase() ?? "";
   if (n.includes("boneless") || n.includes("tender")) return "aderezo";
   if (n.includes("torta")) return "torta";
+  if (n.includes("pollo")) return "pollo";
   return "quick";
 }
 
@@ -87,12 +90,10 @@ export function PantallaPOS() {
   const [borrador, setBorrador] = useState<BorradorPedido>([]);
   const [modal, setModal] = useState<ModalState>(null);
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
-  const [modoDisp, setModoDisp] = useState(false);
   const [folio, setFolio] = useState(1);
   const [sucursalId, setSucursalId] = useState("");
   const [sucursalNombre, setSucursalNombre] = useState("Sucursal");
   const [vistaActiva, setVistaActiva] = useState<"venta" | "pedidos">("venta");
-  const [clienteSeleccionado, setClienteSeleccionado] = useState<ClienteBasico | null>(null);
   const online = useOnlineStatus();
   const scale = useScale();
 
@@ -159,6 +160,8 @@ export function PantallaPOS() {
       setModal({ tipo: "rapido", producto, variante: "aderezo" });
     } else if (kind === "torta") {
       setModal({ tipo: "rapido", producto, variante: "torta" });
+    } else if (kind === "pollo") {
+      setModal({ tipo: "pollo", producto });
     } else {
       setModal({ tipo: "rapido", producto });
     }
@@ -179,6 +182,20 @@ export function PantallaPOS() {
     setModal(null);
   }
 
+  function agregarPollo(producto: ProductoLocal, cantidadPollo: number, notas: string, cantidadPapas: number | null) {
+    const items: ItemBorrador[] = [
+      { id: crypto.randomUUID(), producto, cantidad: cantidadPollo, cortes: [], notas },
+    ];
+    if (cantidadPapas !== null) {
+      const extraPapas = productos.find((p) => p.nombre === "Extra Papas");
+      if (extraPapas) {
+        items.push({ id: crypto.randomUUID(), producto: extraPapas, cantidad: cantidadPapas, cortes: [], notas: "" });
+      }
+    }
+    setBorrador((prev) => [...prev, ...items]);
+    setModal(null);
+  }
+
   function cambiarCantidad(id: string, delta: number) {
     setBorrador((prev) =>
       prev.map((i) => i.id === id ? { ...i, cantidad: i.cantidad + delta } : i)
@@ -191,16 +208,30 @@ export function PantallaPOS() {
     setModal(null);
   }
 
-  async function confirmarCobro(metodoPago: MetodoPago) {
+  async function confirmarCobro(metodoPago: MetodoPago, opciones: OpcionesPedido) {
+    const { tipoEntrega, clienteId, nombreRecoger, horaRecoger, direccionEntrega, referenciaEntrega } = opciones;
     const folioAsignado = await avanzarFolio();
     const ahora = new Date().toISOString();
+    const origenDB = tipoEntrega === "DOMICILIO" ? OrigenPedido.DELIVERY
+      : tipoEntrega === "RECOGER" ? OrigenPedido.TELEFONO
+      : OrigenPedido.MOSTRADOR;
+
+    let horaRecoleccionISO: string | undefined;
+    if (horaRecoger) {
+      const [h, m] = horaRecoger.split(":").map(Number);
+      const dt = new Date();
+      dt.setHours(h!, m!, 0, 0);
+      horaRecoleccionISO = dt.toISOString();
+    }
 
     const pedido = {
       id: crypto.randomUUID(),
       folio: folioAsignado,
       sucursalId,
-      ...(clienteSeleccionado !== null && { clienteId: clienteSeleccionado.id }),
-      origen: OrigenPedido.MOSTRADOR,
+      ...(clienteId !== undefined && { clienteId }),
+      ...(nombreRecoger !== undefined && { notas: nombreRecoger }),
+      ...(horaRecoleccionISO !== undefined && { horaRecoleccion: horaRecoleccionISO }),
+      origen: origenDB,
       estado: EstadoPedido.PENDIENTE,
       metodoPago,
       total: borrador.reduce((s, i) => s + i.producto.precio * i.cantidad, 0),
@@ -225,16 +256,12 @@ export function PantallaPOS() {
     void sincronizarPedido(pedido);
 
     const datosImpresion = buildDatosImpresion(
-      borrador,
-      folioAsignado,
-      sucursalNombre,
-      OrigenPedido.MOSTRADOR,
-      metodoPago
+      borrador, folioAsignado, sucursalNombre, origenDB, metodoPago,
+      undefined, tipoEntrega, nombreRecoger, horaRecoger, direccionEntrega, referenciaEntrega,
     );
     void dispararImpresion(datosImpresion);
 
     setBorrador([]);
-    setClienteSeleccionado(null);
     setFolio(await peekFolio());
     setModal(null);
   }
@@ -264,46 +291,16 @@ export function PantallaPOS() {
             </div>
             <button
               style={{
-                background: modoDisp ? "color-mix(in srgb, var(--accent) 12%, var(--surface))" : "transparent",
-                border: `1px solid ${modoDisp ? "var(--accent)" : "var(--border)"}`,
-                color: modoDisp ? "var(--accent)" : "var(--text-2)",
+                background: "transparent",
+                border: "1px solid var(--border)",
+                color: "var(--text-2)",
                 borderRadius: 8, padding: "6px 12px", fontSize: 13,
                 fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)",
               }}
-              onClick={() => setModoDisp((v) => !v)}
+              onClick={() => setModal({ tipo: "disponibilidad" })}
             >
-              {modoDisp ? "✓ Disponibilidad" : "Disponibilidad"}
+              Disponibilidad
             </button>
-            {/* Badge de cliente seleccionado */}
-            {clienteSeleccionado !== null ? (
-              <div style={{
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "4px 10px 4px 8px", borderRadius: 8,
-                border: "1px solid var(--ok)",
-                background: "color-mix(in srgb, var(--ok) 10%, var(--surface))",
-                cursor: "pointer", fontSize: 13,
-              }} onClick={() => setModal({ tipo: "cliente" })}>
-                <span style={{ fontSize: 10 }}>👤</span>
-                <span style={{ fontWeight: 600, color: "var(--ok)", maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {clienteSeleccionado.nombre ?? clienteSeleccionado.telefono}
-                </span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); setClienteSeleccionado(null); }}
-                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-3)", padding: 0, fontSize: 12 }}
-                >✕</button>
-              </div>
-            ) : (
-              <button
-                style={{
-                  background: "transparent", border: "1px solid var(--border)",
-                  color: "var(--text-2)", borderRadius: 8, padding: "6px 12px",
-                  fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)",
-                }}
-                onClick={() => setModal({ tipo: "cliente" })}
-              >
-                Cliente
-              </button>
-            )}
             <button
               style={{
                 background: "transparent", border: "1px solid var(--border)",
@@ -349,48 +346,11 @@ export function PantallaPOS() {
                 <span className="count">{prodsDeCat.length} productos</span>
               </div>
 
-              {/* Panel de disponibilidad de cortes (global) */}
-              {modoDisp && cortesUnicos.length > 0 && (
-                <div style={{
-                  background: "var(--surface)", border: "1px solid var(--border)",
-                  borderRadius: "var(--radius)", padding: "14px 16px", marginBottom: 16,
-                }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--text-3)", marginBottom: 10 }}>
-                    Disponibilidad de cortes — aplica a todos los paquetes
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                    {cortesUnicos.map(({ nombre, grupoPrecio }) => {
-                      const disponible = nombre in overrides ? (overrides[nombre] ?? true) : true;
-                      return (
-                        <button key={nombre}
-                          onClick={() => void toggleCorteGlobal(nombre)}
-                          style={{
-                            padding: "8px 14px", borderRadius: 8, border: "1.5px solid",
-                            fontFamily: "var(--font)", fontSize: 14, fontWeight: 600, cursor: "pointer",
-                            borderColor: disponible
-                              ? "color-mix(in srgb, var(--ok) 40%, var(--border))"
-                              : "color-mix(in srgb, var(--danger) 40%, var(--border))",
-                            background: disponible
-                              ? "color-mix(in srgb, var(--ok) 10%, var(--surface))"
-                              : "color-mix(in srgb, var(--danger) 10%, var(--surface))",
-                            color: disponible ? "var(--ok)" : "var(--danger)",
-                          }}>
-                          {disponible ? "✓" : "✗"} {nombre}
-                          <span style={{ fontSize: 10, fontWeight: 400, marginLeft: 6, opacity: .7 }}>G{grupoPrecio}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
               <div className="prod-grid">
                 {prodsDeCat.map((prod) => (
                   <ProductoCard key={prod.id} producto={prod}
                     conFoto={!!fotosCategoria}
-                    modoDisp={false}
-                    onToggleVariante={async () => undefined}
-                    onClick={() => modoDisp ? undefined : onClickProducto(prod)} />
+                    onClick={() => onClickProducto(prod)} />
                 ))}
               </div>
             </div>
@@ -489,6 +449,14 @@ export function PantallaPOS() {
             onCancelar={() => setModal(null)}
           />
         )}
+        {modal?.tipo === "pollo" && (
+          <ConfiguradorPollo
+            producto={modal.producto}
+            onConfirmar={(cantidadPollo, notas, cantidadPapas) =>
+              agregarPollo(modal.producto, cantidadPollo, notas, cantidadPapas)}
+            onCancelar={() => setModal(null)}
+          />
+        )}
         {modal?.tipo === "nota" && (
           <EditarNota
             nombreItem={modal.item.producto.nombre}
@@ -503,20 +471,22 @@ export function PantallaPOS() {
             folio={folio}
             sucursal={sucursalNombre}
             onCerrar={() => setModal(null)}
-            onConfirmar={(mp) => void confirmarCobro(mp)}
-          />
-        )}
-
-        {modal?.tipo === "cliente" && (
-          <BuscadorCliente
-            onSeleccionar={(c) => { setClienteSeleccionado(c); setModal(null); }}
-            onCerrar={() => setModal(null)}
+            onConfirmar={(mp, opciones) => void confirmarCobro(mp, opciones)}
           />
         )}
 
         {modal?.tipo === "caja" && (
           <VistaCaja
             sucursalNombre={sucursalNombre}
+            onCerrar={() => setModal(null)}
+          />
+        )}
+
+        {modal?.tipo === "disponibilidad" && (
+          <ConfiguradorDisponibilidad
+            cortes={cortesUnicos}
+            overrides={overrides}
+            onToggle={(nombre) => void toggleCorteGlobal(nombre)}
             onCerrar={() => setModal(null)}
           />
         )}
@@ -539,14 +509,10 @@ export function PantallaPOS() {
 interface CardProps {
   producto: ProductoLocal;
   conFoto: boolean;
-  modoDisp: boolean;
-  onToggleVariante: (id: string, actual: boolean) => Promise<void>;
   onClick: () => void;
 }
 
-function ProductoCard({ producto, conFoto, modoDisp, onToggleVariante, onClick }: CardProps) {
-  const cortesVariantes = producto.variantes.filter((v) => v.grupoPrecio != null);
-
+function ProductoCard({ producto, conFoto, onClick }: CardProps) {
   return (
     <button className="prod-card" onClick={onClick}>
       {conFoto && (
@@ -560,22 +526,6 @@ function ProductoCard({ producto, conFoto, modoDisp, onToggleVariante, onClick }
         <span className="pprice">
           {"$" + producto.precio.toLocaleString("es-MX", { minimumFractionDigits: 0 })}
         </span>
-      )}
-
-      {modoDisp && cortesVariantes.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }} onClick={(e) => e.stopPropagation()}>
-          {cortesVariantes.map((v) => (
-            <button key={v.id}
-              style={{
-                fontSize: 10, padding: "2px 6px", borderRadius: 12, border: "none", cursor: "pointer",
-                background: v.activo ? "color-mix(in srgb, var(--ok) 15%, var(--surface))" : "color-mix(in srgb, var(--danger) 15%, var(--surface))",
-                color: v.activo ? "var(--ok)" : "var(--danger)",
-              }}
-              onClick={() => void onToggleVariante(v.id, v.activo)}>
-              {v.nombre} {v.activo ? "✓" : "✗"}
-            </button>
-          ))}
-        </div>
       )}
     </button>
   );

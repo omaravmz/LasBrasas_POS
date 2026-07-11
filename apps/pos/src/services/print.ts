@@ -2,6 +2,8 @@ import { apiFetch } from "../lib/api.js";
 import type { ItemBorrador } from "../types/pedido.js";
 import type { MetodoPago, OrigenPedido } from "@brasas/shared";
 
+export type TipoEntrega = "MOSTRADOR" | "RECOGER" | "DOMICILIO";
+
 export interface DatosImpresion {
   folio: number;
   sucursal: string;
@@ -18,6 +20,11 @@ export interface DatosImpresion {
   total: number;
   metodoPago: MetodoPago;
   notas?: string;
+  tipoEntrega?: TipoEntrega;
+  nombreRecoger?: string;
+  horaRecoger?: string;
+  direccionEntrega?: string;
+  referenciaEntrega?: string;
 }
 
 // Interfaz que el puente Kotlin expone en window (M1.1 Parte B)
@@ -37,7 +44,12 @@ export function buildDatosImpresion(
   sucursal: string,
   origen: OrigenPedido,
   metodoPago: MetodoPago,
-  notas?: string
+  notas?: string,
+  tipoEntrega?: TipoEntrega,
+  nombreRecoger?: string,
+  horaRecoger?: string,
+  direccionEntrega?: string,
+  referenciaEntrega?: string,
 ): DatosImpresion {
   const lineas: DatosImpresion["lineas"] = items.map((item) => {
     const linea: DatosImpresion["lineas"][number] = {
@@ -66,6 +78,11 @@ export function buildDatosImpresion(
     lineas,
   };
   if (notas !== undefined) datos.notas = notas;
+  if (tipoEntrega !== undefined) datos.tipoEntrega = tipoEntrega;
+  if (nombreRecoger !== undefined) datos.nombreRecoger = nombreRecoger;
+  if (horaRecoger !== undefined) datos.horaRecoger = horaRecoger;
+  if (direccionEntrega !== undefined) datos.direccionEntrega = direccionEntrega;
+  if (referenciaEntrega !== undefined) datos.referenciaEntrega = referenciaEntrega;
 
   return datos;
 }

@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { AppError } from "../middleware/errorHandler.js";
 import { estadoCaja, abrirDia, cerrarDia } from "../services/caja.js";
-import type { GastoInput } from "../services/caja.js";
+import type { GastoInput, EntradaInput } from "../services/caja.js";
 
 // GET /caja/estado
 export async function getEstadoCaja(
@@ -54,11 +54,12 @@ export async function postCierre(
 ): Promise<void> {
   try {
     const { sucursalId } = req.dispositivo!;
-    const { id, conteoFisico, notas, gastos = [] } = req.body as {
+    const { id, conteoFisico, notas, gastos = [], entradas = [] } = req.body as {
       id: string;
       conteoFisico: number;
       notas?: string;
       gastos?: GastoInput[];
+      entradas?: EntradaInput[];
     };
 
     if (!id || conteoFisico == null || typeof conteoFisico !== "number" || conteoFisico < 0) {
@@ -75,7 +76,13 @@ export async function postCierre(
       }
     }
 
-    const cierre = await cerrarDia({ id, sucursalId, conteoFisico, gastos, ...(notas !== undefined && { notas }) });
+    for (const e of entradas) {
+      if (!e.id || !e.concepto?.trim() || typeof e.monto !== "number" || e.monto <= 0) {
+        throw new AppError("VALIDATION_ERROR", "Cada entrada requiere id, concepto y monto > 0", 400);
+      }
+    }
+
+    const cierre = await cerrarDia({ id, sucursalId, conteoFisico, gastos, entradas, ...(notas !== undefined && { notas }) });
     res.status(201).json(cierre);
   } catch (err) {
     next(err);

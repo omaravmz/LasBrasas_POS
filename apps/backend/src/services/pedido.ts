@@ -27,6 +27,7 @@ export interface CrearPedidoInput {
   metodoPago: MetodoPago;
   total: number;
   notas?: string;
+  horaRecoleccion?: string;
   items: ItemPedidoInput[];
 }
 
@@ -73,6 +74,7 @@ export async function crearPedido(input: CrearPedidoInput): Promise<Pedido> {
         metodoPago: input.metodoPago,
         total: input.total,
         notas: input.notas ?? null,
+        horaRecoleccion: input.horaRecoleccion ? new Date(input.horaRecoleccion) : null,
         items: {
           create: input.items.map((item) => ({
             id: item.id,

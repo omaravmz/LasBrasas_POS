@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   getEstadoCaja, abrirDia, cerrarDia,
-  type EstadoCaja, type CierreInfo, type GastoInput,
+  type EstadoCaja, type CierreInfo, type GastoInput, type EntradaInput,
 } from "../services/cajaService.js";
 
 interface Props {
@@ -29,6 +29,7 @@ function generarReporte(
   sucursalNombre: string,
 ): string {
   const totalGastos = cierre.gastos.reduce((s, g) => s + g.monto, 0);
+  const totalEntradas = cierre.entradas.reduce((s, e) => s + e.monto, 0);
   const ef = cierre.fondoInicial + cierre.ventasEfectivo - cierre.reembolsosEfectivo;
   const difSign = cierre.diferencia >= 0 ? "SOBRA" : "FALTA";
 
@@ -54,6 +55,11 @@ function generarReporte(
       ? ["", "═══ GASTOS ═════════════════════════",
           ...cierre.gastos.map((g) => `• ${g.concepto}: ${peso(g.monto)}`),
           `TOTAL GASTOS:   ${peso(totalGastos)}`]
+      : []),
+    ...(totalEntradas > 0
+      ? ["", "═══ ENTRADAS ═══════════════════════",
+          ...cierre.entradas.map((e) => `• ${e.concepto}: ${peso(e.monto)}`),
+          `TOTAL ENTRADAS: ${peso(totalEntradas)}`]
       : []),
     ...(cierre.notas ? ["", `📝 ${cierre.notas}`] : []),
   ];
@@ -211,8 +217,11 @@ function PantallaCierre({ fecha: _fecha, apertura, ventas, onCerrado }: CierrePr
   const [conteo, setConteo] = useState("");
   const [notas, setNotas] = useState("");
   const [gastos, setGastos] = useState<GastoInput[]>([]);
-  const [nuevoConcepto, setNuevoConcepto] = useState("");
-  const [nuevoMonto, setNuevoMonto] = useState("");
+  const [nuevoConceptoGasto, setNuevoConceptoGasto] = useState("");
+  const [nuevoMontoGasto, setNuevoMontoGasto] = useState("");
+  const [entradas, setEntradas] = useState<EntradaInput[]>([]);
+  const [nuevoConceptoEntrada, setNuevoConceptoEntrada] = useState("");
+  const [nuevoMontoEntrada, setNuevoMontoEntrada] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -220,17 +229,30 @@ function PantallaCierre({ fecha: _fecha, apertura, ventas, onCerrado }: CierrePr
   const conteoNum = parseFloat(conteo);
   const diferencia = isNaN(conteoNum) ? null : conteoNum - efectivoEsperado;
   const totalGastos = gastos.reduce((s, g) => s + g.monto, 0);
+  const totalEntradas = entradas.reduce((s, e) => s + e.monto, 0);
 
   function agregarGasto() {
-    const m = parseFloat(nuevoMonto);
-    if (!nuevoConcepto.trim() || isNaN(m) || m <= 0) return;
-    setGastos((prev) => [...prev, { id: crypto.randomUUID(), concepto: nuevoConcepto.trim(), monto: m }]);
-    setNuevoConcepto("");
-    setNuevoMonto("");
+    const m = parseFloat(nuevoMontoGasto);
+    if (!nuevoConceptoGasto.trim() || isNaN(m) || m <= 0) return;
+    setGastos((prev) => [...prev, { id: crypto.randomUUID(), concepto: nuevoConceptoGasto.trim(), monto: m }]);
+    setNuevoConceptoGasto("");
+    setNuevoMontoGasto("");
   }
 
   function quitarGasto(id: string) {
     setGastos((prev) => prev.filter((g) => g.id !== id));
+  }
+
+  function agregarEntrada() {
+    const m = parseFloat(nuevoMontoEntrada);
+    if (!nuevoConceptoEntrada.trim() || isNaN(m) || m <= 0) return;
+    setEntradas((prev) => [...prev, { id: crypto.randomUUID(), concepto: nuevoConceptoEntrada.trim(), monto: m }]);
+    setNuevoConceptoEntrada("");
+    setNuevoMontoEntrada("");
+  }
+
+  function quitarEntrada(id: string) {
+    setEntradas((prev) => prev.filter((e) => e.id !== id));
   }
 
   async function cerrar() {
@@ -241,7 +263,7 @@ function PantallaCierre({ fecha: _fecha, apertura, ventas, onCerrado }: CierrePr
     setError(null);
     setEnviando(true);
     try {
-      await cerrarDia(crypto.randomUUID(), conteoNum, gastos, notas.trim() || undefined);
+      await cerrarDia(crypto.randomUUID(), conteoNum, gastos, entradas, notas.trim() || undefined);
       onCerrado();
     } catch {
       setError("No se pudo registrar el cierre. Verifica la conexión.");
@@ -333,20 +355,59 @@ function PantallaCierre({ fecha: _fecha, apertura, ventas, onCerrado }: CierrePr
 
         <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
           <input
-            type="text" value={nuevoConcepto}
-            onChange={(e) => setNuevoConcepto(e.target.value)}
+            type="text" value={nuevoConceptoGasto}
+            onChange={(e) => setNuevoConceptoGasto(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && agregarGasto()}
             placeholder="Concepto"
             style={{ ...inputStyle, flex: 2 }}
           />
           <input
-            type="number" min="0" step="0.01" value={nuevoMonto}
-            onChange={(e) => setNuevoMonto(e.target.value)}
+            type="number" min="0" value={nuevoMontoGasto}
+            onChange={(e) => setNuevoMontoGasto(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && agregarGasto()}
             placeholder="$0"
             style={{ ...inputStyle, flex: 1 }}
           />
           <button onClick={agregarGasto} style={btnBorderStyle}>+</button>
+        </div>
+
+        {/* Entradas */}
+        <SectionTitle>Entradas del día</SectionTitle>
+        {entradas.length > 0 && (
+          <div style={{ marginBottom: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+            {entradas.map((e) => (
+              <div key={e.id} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "6px 10px", background: "var(--bg)", borderRadius: 6,
+                border: "1px solid var(--border)", fontSize: 13,
+              }}>
+                <span style={{ flex: 1 }}>{e.concepto}</span>
+                <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{peso(e.monto)}</span>
+                <button onClick={() => quitarEntrada(e.id)} style={btnIconSmall}>✕</button>
+              </div>
+            ))}
+            <div style={{ fontSize: 12, color: "var(--ok)", textAlign: "right", paddingRight: 32 }}>
+              Total: {peso(totalEntradas)}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+          <input
+            type="text" value={nuevoConceptoEntrada}
+            onChange={(e) => setNuevoConceptoEntrada(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && agregarEntrada()}
+            placeholder="Concepto"
+            style={{ ...inputStyle, flex: 2 }}
+          />
+          <input
+            type="number" min="0" value={nuevoMontoEntrada}
+            onChange={(e) => setNuevoMontoEntrada(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && agregarEntrada()}
+            placeholder="$0"
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <button onClick={agregarEntrada} style={btnBorderStyle}>+</button>
         </div>
 
         <Field label="Notas (opcional)">
@@ -381,6 +442,7 @@ function PantallaResumen({
 }) {
   const [copiado, setCopiado] = useState(false);
   const totalGastos = cierre.gastos.reduce((s, g) => s + g.monto, 0);
+  const totalEntradas = cierre.entradas.reduce((s, e) => s + e.monto, 0);
 
   function copiar() {
     void navigator.clipboard.writeText(generarReporte(estado, cierre, sucursalNombre)).then(() => {
@@ -434,6 +496,17 @@ function PantallaResumen({
             <FilaResumen key={g.id} label={g.concepto} valor={peso(g.monto)} />
           ))}
           <FilaResumen label="Total gastos" valor={peso(totalGastos)} bold />
+        </>
+      )}
+
+      {cierre.entradas.length > 0 && (
+        <>
+          <div style={{ height: 20 }} />
+          <SectionTitle>Entradas</SectionTitle>
+          {cierre.entradas.map((e) => (
+            <FilaResumen key={e.id} label={e.concepto} valor={peso(e.monto)} color="var(--ok)" />
+          ))}
+          <FilaResumen label="Total entradas" valor={peso(totalEntradas)} bold color="var(--ok)" />
         </>
       )}
 
