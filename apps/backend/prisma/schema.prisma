@@ -338,6 +338,7 @@ model CierreDia {
 
   sucursal        Sucursal        @relation(fields: [sucursalId], references: [id])
   gastos          GastoDia[]
+  entradas        EntradaDia[]
   bolsasSobrantes BolsaSobrante[]
 
   @@unique([sucursalId, fecha])
@@ -349,6 +350,16 @@ model GastoDia {
   concepto    String
   monto       Decimal  @db.Decimal(10, 2)
   fotoTicket  String?
+  creadoEn    DateTime @default(now())
+
+  cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])
+}
+
+model EntradaDia {
+  id          String   @id @default(uuid())
+  cierreDiaId String
+  concepto    String
+  monto       Decimal  @db.Decimal(10, 2)
   creadoEn    DateTime @default(now())
 
   cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])

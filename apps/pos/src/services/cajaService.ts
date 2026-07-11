@@ -20,6 +20,7 @@ export interface CierreInfo {
   conteoFisico: number;
   diferencia: number;
   gastos: { id: string; concepto: string; monto: number }[];
+  entradas: { id: string; concepto: string; monto: number }[];
   notas: string | null;
   cerradoEn: string;
 }
@@ -32,6 +33,12 @@ export interface EstadoCaja {
 }
 
 export interface GastoInput {
+  id: string;
+  concepto: string;
+  monto: number;
+}
+
+export interface EntradaInput {
   id: string;
   concepto: string;
   monto: number;
@@ -52,10 +59,11 @@ export async function cerrarDia(
   id: string,
   conteoFisico: number,
   gastos: GastoInput[],
+  entradas: EntradaInput[],
   notas?: string,
 ): Promise<CierreInfo> {
   return apiFetch<CierreInfo>("/caja/cierre", {
     method: "POST",
-    body: JSON.stringify({ id, conteoFisico, gastos, ...(notas !== undefined && { notas }) }),
+    body: JSON.stringify({ id, conteoFisico, gastos, entradas, ...(notas !== undefined && { notas }) }),
   });
 }

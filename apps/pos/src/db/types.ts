@@ -36,6 +36,7 @@ export interface PedidoLocal {
   metodoPago?: MetodoPago;
   total: number;
   notas?: string;
+  horaRecoleccion?: string;
   creadoEn: string;
   actualizadoEn: string;
   items: ItemPedidoLocal[];

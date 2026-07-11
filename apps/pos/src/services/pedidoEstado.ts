@@ -7,6 +7,8 @@ export interface PedidoActivo {
   estado: EstadoPedido;
   origen: OrigenPedido;
   total: number;
+  notas?: string;
+  horaRecoleccion?: string;
   creadoEn: string;
   items: {
     id: string;

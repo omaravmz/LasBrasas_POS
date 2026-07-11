@@ -45,6 +45,7 @@ export interface EstadoCaja {
     conteoFisico: number;
     diferencia: number;
     gastos: { id: string; concepto: string; monto: number }[];
+    entradas: { id: string; concepto: string; monto: number }[];
     notas: string | null;
     cerradoEn: string;
   } | null;
@@ -111,7 +112,10 @@ export async function estadoCaja(sucursalId: string): Promise<EstadoCaja> {
     }),
     prisma.cierreDia.findUnique({
       where: { sucursalId_fecha: { sucursalId, fecha: fd } },
-      include: { gastos: { orderBy: { creadoEn: "asc" } } },
+      include: {
+        gastos:   { orderBy: { creadoEn: "asc" } },
+        entradas: { orderBy: { creadoEn: "asc" } },
+      },
     }),
   ]);
 
@@ -143,6 +147,11 @@ export async function estadoCaja(sucursalId: string): Promise<EstadoCaja> {
             id: g.id,
             concepto: g.concepto,
             monto: g.monto.toNumber(),
+          })),
+          entradas: cierre.entradas.map((e) => ({
+            id: e.id,
+            concepto: e.concepto,
+            monto: e.monto.toNumber(),
           })),
           notas: cierre.notas,
           cerradoEn: cierre.cerradoEn.toISOString(),
@@ -194,12 +203,19 @@ export interface GastoInput {
   monto: number;
 }
 
+export interface EntradaInput {
+  id: string;
+  concepto: string;
+  monto: number;
+}
+
 export interface CerrarDiaInput {
   id: string;
   sucursalId: string;
   conteoFisico: number;
   notas?: string;
   gastos: GastoInput[];
+  entradas: EntradaInput[];
 }
 
 export async function cerrarDia(input: CerrarDiaInput): Promise<EstadoCaja["cierre"]> {
@@ -252,8 +268,15 @@ export async function cerrarDia(input: CerrarDiaInput): Promise<EstadoCaja["cier
           monto: g.monto,
         })),
       },
+      entradas: {
+        create: input.entradas.map((e) => ({
+          id: e.id,
+          concepto: e.concepto,
+          monto: e.monto,
+        })),
+      },
     },
-    include: { gastos: true },
+    include: { gastos: true, entradas: true },
   });
 
   return {
@@ -270,6 +293,11 @@ export async function cerrarDia(input: CerrarDiaInput): Promise<EstadoCaja["cier
       id: g.id,
       concepto: g.concepto,
       monto: g.monto.toNumber(),
+    })),
+    entradas: cierre.entradas.map((e) => ({
+      id: e.id,
+      concepto: e.concepto,
+      monto: e.monto.toNumber(),
     })),
     notas: cierre.notas,
     cerradoEn: cierre.cerradoEn.toISOString(),
