@@ -1,13 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
 import { prisma } from "../lib/prisma.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { cancelarPedido } from "../services/pedido.js";
+import { cancelarPedido, esTransicionValida } from "../services/pedido.js";
 import type { EstadoPedido } from "@prisma/client";
-
-const TRANSICIONES_VALIDAS: Partial<Record<EstadoPedido, EstadoPedido[]>> = {
-  PENDIENTE: ["LISTO", "CANCELADO"],
-  LISTO: ["ENTREGADO", "CANCELADO"],
-};
 
 export async function patchPedidoEstado(
   req: Request,
@@ -25,7 +20,14 @@ export async function patchPedidoEstado(
 
     const pedido = await prisma.pedido.findUnique({
       where: { id },
-      select: { id: true, estado: true, sucursalId: true, metodoPago: true, total: true },
+      select: {
+        id: true,
+        estado: true,
+        origen: true,
+        sucursalId: true,
+        metodoPago: true,
+        total: true,
+      },
     });
 
     if (!pedido) {
@@ -36,8 +38,7 @@ export async function patchPedidoEstado(
       throw new AppError("FORBIDDEN", "El pedido no pertenece a esta sucursal", 403);
     }
 
-    const permitidos = TRANSICIONES_VALIDAS[pedido.estado] ?? [];
-    if (!permitidos.includes(nuevoEstado)) {
+    if (!esTransicionValida(pedido.origen, pedido.estado, nuevoEstado)) {
       throw new AppError(
         "INVALID_TRANSITION",
         `No se puede pasar de ${pedido.estado} a ${nuevoEstado}`,

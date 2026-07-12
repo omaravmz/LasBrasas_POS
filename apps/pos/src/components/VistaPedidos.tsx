@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { EstadoPedido, OrigenPedido } from "@brasas/shared";
 import { cargarPedidosActivos, actualizarEstado, type PedidoActivo } from "../services/pedidoEstado.js";
 import { suscribirPedidos } from "../services/realtime.js";
+import { mensajeError } from "../lib/api.js";
 
 interface Props {
   sucursalId: string;
@@ -72,8 +73,8 @@ export function VistaPedidos({ sucursalId, sucursalNombre, onVolver }: Props) {
       const data = await cargarPedidosActivos();
       setPedidos(data);
       setError(null);
-    } catch {
-      setError("No se pudo cargar los pedidos. ¿Hay conexión?");
+    } catch (err) {
+      setError(mensajeError(err, "No se pudo cargar los pedidos."));
     } finally {
       setCargando(false);
     }
@@ -92,8 +93,8 @@ export function VistaPedidos({ sucursalId, sucursalNombre, onVolver }: Props) {
       setPedidos((prev) =>
         prev.map((p) => p.id === pedido.id ? { ...p, estado: siguiente } : p),
       );
-    } catch {
-      setError("No se pudo actualizar el estado. Verifica la conexión.");
+    } catch (err) {
+      setError(mensajeError(err, "No se pudo actualizar el estado."));
     } finally {
       setActualizando(null);
     }
@@ -105,8 +106,8 @@ export function VistaPedidos({ sucursalId, sucursalNombre, onVolver }: Props) {
     try {
       await actualizarEstado(pedido.id, EstadoPedido.CANCELADO);
       setPedidos((prev) => prev.filter((p) => p.id !== pedido.id));
-    } catch {
-      setError("No se pudo cancelar el pedido. Verifica la conexión.");
+    } catch (err) {
+      setError(mensajeError(err, "No se pudo cancelar el pedido."));
     } finally {
       setActualizando(null);
     }

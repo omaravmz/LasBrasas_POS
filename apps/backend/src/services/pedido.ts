@@ -1,6 +1,35 @@
 import { prisma } from "../lib/prisma.js";
 import type { Decimal } from "@prisma/client/runtime/library.js";
-import type { MetodoPago, OrigenPedido, Pedido } from "@prisma/client";
+import type { EstadoPedido, MetodoPago, OrigenPedido, Pedido } from "@prisma/client";
+
+// Transiciones de estado permitidas, por origen del pedido.
+//
+// En MOSTRADOR el cliente espera y se lleva el pedido en el momento: no hay una
+// etapa intermedia de "listo para recoger", así que PENDIENTE -> ENTREGADO es
+// válido. Los pedidos a distancia (TELEFONO, WHATSAPP, DELIVERY) sí pasan por
+// LISTO antes de salir.
+const REMOTO: Partial<Record<EstadoPedido, EstadoPedido[]>> = {
+  PENDIENTE: ["LISTO", "CANCELADO"],
+  LISTO: ["ENTREGADO", "CANCELADO"],
+};
+
+const TRANSICIONES: Record<OrigenPedido, Partial<Record<EstadoPedido, EstadoPedido[]>>> = {
+  MOSTRADOR: {
+    PENDIENTE: ["LISTO", "ENTREGADO", "CANCELADO"],
+    LISTO: ["ENTREGADO", "CANCELADO"],
+  },
+  TELEFONO: REMOTO,
+  WHATSAPP: REMOTO,
+  DELIVERY: REMOTO,
+};
+
+export function esTransicionValida(
+  origen: OrigenPedido,
+  actual: EstadoPedido,
+  nuevo: EstadoPedido,
+): boolean {
+  return (TRANSICIONES[origen][actual] ?? []).includes(nuevo);
+}
 
 export interface SeleccionInput {
   id: string;

@@ -1,6 +1,30 @@
 const BASE_URL = import.meta.env["VITE_API_URL"] ?? "/api";
 const DEVICE_TOKEN = import.meta.env["VITE_DEVICE_TOKEN"] ?? "";
 
+export interface ApiError {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+// Un fallo de red arroja un TypeError, que también trae `message`; lo que
+// distingue a una respuesta de error del backend es el `code`.
+function esApiError(err: unknown): err is ApiError {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: unknown; message?: unknown };
+  return typeof e.code === "string" && typeof e.message === "string";
+}
+
+/**
+ * Traduce lo que arroja `apiFetch` a un mensaje para el usuario. El backend
+ * responde `{ code, message }`; solo cuando no hay respuesta (fetch falló) se
+ * culpa a la conexión.
+ */
+export function mensajeError(err: unknown, fallback: string): string {
+  if (esApiError(err)) return err.message;
+  return `${fallback} Verifica la conexión.`;
+}
+
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
