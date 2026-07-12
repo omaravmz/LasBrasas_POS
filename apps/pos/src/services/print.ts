@@ -27,9 +27,35 @@ export interface DatosImpresion {
   referenciaEntrega?: string;
 }
 
+export interface DatosCierreImpresion {
+  sucursal: string;
+  fecha: string; // YYYY-MM-DD (fecha local Mazatlán)
+  cerradoEn: string; // ISO string
+  fondoInicial: number;
+  ventasEfectivo: number;
+  ventasTarjeta: number;
+  ventasTransfer: number;
+  totalVentas: number;
+  numPedidos: number;
+  pedidos: {
+    folio: number;
+    total: number;
+    metodoPago: MetodoPago | null;
+    cancelado: boolean;
+  }[];
+  entradas: { concepto: string; monto: number }[];
+  gastos: { concepto: string; monto: number }[];
+  reembolsosEfectivo: number;
+  esperadoEnCaja: number;
+  conteoFisico: number;
+  diferencia: number;
+  notas?: string;
+}
+
 // Interfaz que el puente Kotlin expone en window (M1.1 Parte B)
 interface BrasasPrintBridge {
   imprimir(datosJson: string): void;
+  imprimirCierre?(datosJson: string): void;
 }
 
 declare global {
@@ -103,5 +129,23 @@ export async function dispararImpresion(datos: DatosImpresion): Promise<void> {
   } catch {
     // En entorno sin backend (tests de UI puros) se ignora
     console.debug("[print] Dev backend no disponible; sin PDFs generados");
+  }
+}
+
+export async function dispararImpresionCierre(datos: DatosCierreImpresion): Promise<void> {
+  if (window.BrasasPrint?.imprimirCierre) {
+    // Producción: puente WebView → Kotlin → impresora térmica
+    window.BrasasPrint.imprimirCierre(JSON.stringify(datos));
+    return;
+  }
+
+  // Desarrollo: generar el PDF del corte en el servidor
+  try {
+    await apiFetch<unknown>("/dev/imprimir-cierre", {
+      method: "POST",
+      body: JSON.stringify(datos),
+    });
+  } catch {
+    console.debug("[print] Dev backend no disponible; sin PDF de corte generado");
   }
 }

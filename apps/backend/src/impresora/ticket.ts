@@ -21,6 +21,38 @@ export interface DatosTicket {
   notas?: string;
 }
 
+export interface PedidoCierre {
+  folio: number;
+  total: number;
+  metodoPago: MetodoPago | null;
+  cancelado: boolean;
+}
+
+export interface MovimientoCierre {
+  concepto: string;
+  monto: number;
+}
+
+export interface DatosTicketCierre {
+  sucursal: string;
+  fecha: string; // YYYY-MM-DD (fecha local Mazatlán)
+  cerradoEn: Date;
+  fondoInicial: number;
+  ventasEfectivo: number;
+  ventasTarjeta: number;
+  ventasTransfer: number;
+  totalVentas: number;
+  numPedidos: number;
+  pedidos: PedidoCierre[];
+  entradas: MovimientoCierre[];
+  gastos: MovimientoCierre[];
+  reembolsosEfectivo: number;
+  esperadoEnCaja: number;
+  conteoFisico: number;
+  diferencia: number;
+  notas?: string;
+}
+
 export interface DatosContacto {
   sucursalPraderaDorada: string;
   sucursalVillasDelRio: string;

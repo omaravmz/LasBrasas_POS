@@ -1,7 +1,22 @@
 import type { Request, Response, NextFunction } from "express";
 import { AppError } from "../middleware/errorHandler.js";
-import { estadoCaja, abrirDia, cerrarDia } from "../services/caja.js";
-import type { GastoInput, EntradaInput } from "../services/caja.js";
+import {
+  estadoCaja,
+  abrirDia,
+  cerrarDia,
+  listarPedidosDia,
+  calcularVentasDia,
+  registrarMovimiento,
+  eliminarMovimiento,
+} from "../services/caja.js";
+import type { TipoMovimientoCaja } from "@prisma/client";
+
+const TIPOS_MOVIMIENTO: TipoMovimientoCaja[] = ["ENTRADA", "GASTO"];
+
+// Mazatlan = UTC-7 (sin DST desde 2023)
+function fechaMazatlanHoy(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Mazatlan" }).format(new Date());
+}
 
 // GET /caja/estado
 export async function getEstadoCaja(
@@ -12,6 +27,27 @@ export async function getEstadoCaja(
   try {
     const { sucursalId } = req.dispositivo!;
     res.json(await estadoCaja(sucursalId));
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /caja/ventas — pedidos del día (incluye cancelados) + resumen por método de pago
+export async function getVentasDia(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { sucursalId } = req.dispositivo!;
+    const fecha = fechaMazatlanHoy();
+
+    const [resumen, pedidos] = await Promise.all([
+      calcularVentasDia(sucursalId, fecha),
+      listarPedidosDia(sucursalId, fecha),
+    ]);
+
+    res.json({ fecha, resumen, pedidos });
   } catch (err) {
     next(err);
   }
@@ -46,6 +82,65 @@ export async function postApertura(
   }
 }
 
+// POST /caja/movimientos — registra una entrada o un retiro/gasto en vivo
+export async function postMovimiento(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { sucursalId } = req.dispositivo!;
+    const { id, tipo, concepto, monto } = req.body as {
+      id: string;
+      tipo: TipoMovimientoCaja;
+      concepto: string;
+      monto: number;
+    };
+
+    if (!id) {
+      throw new AppError("VALIDATION_ERROR", "El campo id es requerido", 400);
+    }
+    if (!TIPOS_MOVIMIENTO.includes(tipo)) {
+      throw new AppError("VALIDATION_ERROR", "El tipo debe ser ENTRADA o GASTO", 400);
+    }
+    if (!concepto?.trim()) {
+      throw new AppError("VALIDATION_ERROR", "El concepto es requerido", 400);
+    }
+    if (typeof monto !== "number" || !Number.isFinite(monto) || monto <= 0) {
+      throw new AppError("VALIDATION_ERROR", "El monto debe ser un número mayor a 0", 400);
+    }
+
+    const movimiento = await registrarMovimiento({
+      id,
+      sucursalId,
+      tipo,
+      concepto: concepto.trim(),
+      monto,
+    });
+
+    res.status(201).json(movimiento);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// DELETE /caja/movimientos/:id
+export async function deleteMovimiento(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { sucursalId } = req.dispositivo!;
+    const { id } = req.params as { id: string };
+
+    await eliminarMovimiento(id, sucursalId);
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+}
+
 // POST /caja/cierre
 export async function postCierre(
   req: Request,
@@ -54,12 +149,10 @@ export async function postCierre(
 ): Promise<void> {
   try {
     const { sucursalId } = req.dispositivo!;
-    const { id, conteoFisico, notas, gastos = [], entradas = [] } = req.body as {
+    const { id, conteoFisico, notas } = req.body as {
       id: string;
       conteoFisico: number;
       notas?: string;
-      gastos?: GastoInput[];
-      entradas?: EntradaInput[];
     };
 
     if (!id || conteoFisico == null || typeof conteoFisico !== "number" || conteoFisico < 0) {
@@ -70,19 +163,12 @@ export async function postCierre(
       );
     }
 
-    for (const g of gastos) {
-      if (!g.id || !g.concepto?.trim() || typeof g.monto !== "number" || g.monto < 0) {
-        throw new AppError("VALIDATION_ERROR", "Cada gasto requiere id, concepto y monto ≥ 0", 400);
-      }
-    }
-
-    for (const e of entradas) {
-      if (!e.id || !e.concepto?.trim() || typeof e.monto !== "number" || e.monto <= 0) {
-        throw new AppError("VALIDATION_ERROR", "Cada entrada requiere id, concepto y monto > 0", 400);
-      }
-    }
-
-    const cierre = await cerrarDia({ id, sucursalId, conteoFisico, gastos, entradas, ...(notas !== undefined && { notas }) });
+    const cierre = await cerrarDia({
+      id,
+      sucursalId,
+      conteoFisico,
+      ...(notas !== undefined && { notas }),
+    });
     res.status(201).json(cierre);
   } catch (err) {
     next(err);

@@ -1,4 +1,4 @@
-import type { DatosTicket } from "./ticket.js";
+import type { DatosTicket, DatosTicketCierre } from "./ticket.js";
 
 export interface ImpresoraService {
   /**
@@ -7,4 +7,9 @@ export interface ImpresoraService {
    * En la implementación real envía comandos a la impresora térmica.
    */
   imprimir(ticket: DatosTicket): Promise<void>;
+
+  /**
+   * Imprime el ticket del corte de caja al cerrar el día.
+   */
+  imprimirCierre(cierre: DatosTicketCierre): Promise<void>;
 }

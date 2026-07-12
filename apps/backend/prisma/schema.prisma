@@ -59,6 +59,11 @@ enum TipoInsumo {
   COMPLEMENTO
 }
 
+enum TipoMovimientoCaja {
+  ENTRADA
+  GASTO
+}
+
 // ---------------------------------------------------------------------------
 // Organización
 // ---------------------------------------------------------------------------
@@ -76,6 +81,7 @@ model Sucursal {
   consumosEmpleado  ConsumoEmpleado[]
   cierresDia        CierreDia[]
   aperturasDia      AperturaDia[]
+  movimientosCaja   MovimientoCaja[]
 }
 
 model Dispositivo {
@@ -318,6 +324,22 @@ model AperturaDia {
   sucursal Sucursal @relation(fields: [sucursalId], references: [id])
 
   @@unique([sucursalId, fecha])
+}
+
+// Entradas y retiros de efectivo registrados en vivo durante el día.
+// Al cerrar, se copian a GastoDia/EntradaDia como snapshot inmutable del cierre.
+model MovimientoCaja {
+  id         String             @id @default(uuid())
+  sucursalId String
+  fecha      DateTime           @db.Date
+  tipo       TipoMovimientoCaja
+  concepto   String
+  monto      Decimal            @db.Decimal(10, 2)
+  creadoEn   DateTime           @default(now())
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+
+  @@index([sucursalId, fecha])
 }
 
 model CierreDia {

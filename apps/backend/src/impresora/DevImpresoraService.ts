@@ -2,8 +2,12 @@ import PDFDocument from "pdfkit";
 import { createWriteStream, mkdirSync } from "fs";
 import { join, resolve } from "path";
 import type { ImpresoraService } from "./ImpresoraService.js";
-import type { DatosTicket } from "./ticket.js";
-import { generarTicketCliente, generarTicketProduccion } from "./generarTicket.js";
+import type { DatosTicket, DatosTicketCierre } from "./ticket.js";
+import {
+  generarTicketCliente,
+  generarTicketProduccion,
+  generarTicketCierre,
+} from "./generarTicket.js";
 
 // 80mm en puntos PDF (1 punto = 1/72 pulgada; 80mm = 3.15" = 226.8pt)
 const ANCHO_PT = 226.8;
@@ -38,6 +42,17 @@ export class DevImpresoraService implements ImpresoraService {
     console.log(`[DevImpresora] Tickets generados en ${OUTPUT_DIR}/`);
     console.log(`  → ticket-${folio}-cliente.pdf`);
     console.log(`  → ticket-${folio}-produccion.pdf`);
+  }
+
+  async imprimirCierre(datos: DatosTicketCierre): Promise<void> {
+    mkdirSync(OUTPUT_DIR, { recursive: true });
+
+    const nombre = `corte-${datos.fecha}.pdf`;
+
+    await this.generarPDF(generarTicketCierre(datos), join(OUTPUT_DIR, nombre), true);
+
+    console.log(`[DevImpresora] Corte de caja generado en ${OUTPUT_DIR}/`);
+    console.log(`  → ${nombre}`);
   }
 
   private generarPDF(
@@ -78,7 +93,9 @@ export class DevImpresoraService implements ImpresoraService {
       // Renderizar líneas
       for (const linea of lineas) {
         const esEncabezado =
-          linea.includes("LAS BRASAS") || linea.includes("PRODUCCIÓN");
+          linea.includes("LAS BRASAS") ||
+          linea.includes("PRODUCCIÓN") ||
+          linea.includes("CORTE DE CAJA");
 
         doc
           .font(esEncabezado ? "Courier-Bold" : "Courier")
