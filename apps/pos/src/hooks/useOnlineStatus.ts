@@ -1,12 +1,15 @@
 import { useEffect, useState, useCallback } from "react";
-import { sincronizarPendientes } from "../services/syncQueue.js";
+import { sincronizarTodo } from "../sync/colaSync.js";
 
 export function useOnlineStatus(): boolean {
   const [online, setOnline] = useState(navigator.onLine);
 
   const handleOnline = useCallback(() => {
     setOnline(true);
-    void sincronizarPendientes();
+    // Drena la cola completa, en orden: apertura → pedidos → movimientos → cierre.
+    // Sincronizar solo los pedidos dejaría fuera la apertura, y el servidor los
+    // rechazaría todos con DIA_NO_ABIERTO.
+    void sincronizarTodo();
   }, []);
 
   const handleOffline = useCallback(() => setOnline(false), []);

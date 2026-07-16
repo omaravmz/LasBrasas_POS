@@ -1,5 +1,4 @@
 import { getLocalDB } from "../db/db.js";
-import { apiFetch } from "../lib/api.js";
 import type { PedidoLocal } from "../db/types.js";
 
 export async function guardarPedido(pedido: PedidoLocal): Promise<void> {
@@ -7,28 +6,22 @@ export async function guardarPedido(pedido: PedidoLocal): Promise<void> {
   await db.guardarPedido(pedido);
 }
 
-export async function sincronizarPedido(pedido: PedidoLocal): Promise<void> {
-  try {
-    const resultado = await apiFetch<{ sincronizados: string[]; errores: unknown[] }>(
-      "/sync/pedidos",
-      {
-        method: "POST",
-        body: JSON.stringify({ pedidos: [buildPayload(pedido)] }),
-      },
-    );
-    if (resultado.sincronizados.includes(pedido.id)) {
-      const db = await getLocalDB();
-      await db.marcarSincronizados([pedido.id]);
-    }
-  } catch {
-    // Offline o error de red — se reintentará al reconectar
-  }
-}
+// Ya no existe un `sincronizarPedido` que envíe UN pedido suelto: la sincronización pasa
+// siempre por la cola completa (`sync/colaSync.ts`), que respeta el orden
+// apertura → pedidos → movimientos → cierre. Enviar un pedido por su cuenta se saltaría
+// la apertura y el servidor lo rechazaría con DIA_NO_ABIERTO.
 
 export function buildPayload(pedido: PedidoLocal) {
   return {
     id: pedido.id,
     folio: pedido.folio,
+    // El día de operación viaja explícito: el servidor NO lo deriva del momento en que
+    // recibe el pedido, porque un pedido sincronizado de madrugada caería en el día
+    // equivocado. Ver BD-02.
+    fechaOperativa: pedido.fechaOperativa,
+    // Con qué versión del catálogo se cotizó. Le permite al servidor distinguir un
+    // precio mal calculado de un precio legítimamente viejo. Ver BD-04.
+    catalogoVersion: pedido.catalogoVersion,
     origen: pedido.origen,
     metodoPago: pedido.metodoPago,
     total: pedido.total,

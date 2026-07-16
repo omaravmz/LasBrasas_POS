@@ -6,6 +6,9 @@ import type { MetodoPago, OrigenPedido } from "@prisma/client";
 const ORIGENES_VALIDOS: OrigenPedido[] = ["MOSTRADOR", "TELEFONO", "WHATSAPP", "DELIVERY"];
 const METODOS_VALIDOS: MetodoPago[] = ["EFECTIVO", "TARJETA", "TRANSFERENCIA"];
 
+// El controlador solo valida la FORMA del request. Las reglas de negocio —aritmética
+// del total, precios contra el catálogo, día de operación, idempotencia— viven en el
+// servicio. Ver DISENO_BLOQUE1.md §6.
 export async function postPedido(
   req: Request,
   res: Response,
@@ -22,6 +25,8 @@ export async function postPedido(
     if (
       typeof body.id !== "string" ||
       typeof body.folio !== "number" ||
+      typeof body.fechaOperativa !== "string" ||
+      typeof body.catalogoVersion !== "number" ||
       typeof body.total !== "number" ||
       !body.origen ||
       !body.metodoPago ||
@@ -42,9 +47,13 @@ export async function postPedido(
     const clienteId = typeof body.clienteId === "string" ? body.clienteId : undefined;
     const notas = typeof body.notas === "string" ? body.notas : undefined;
 
+    // sucursalId NO viaja en el body: se resuelve desde el token del dispositivo. Que la
+    // terminal pudiera declarar su propia sucursal sería innecesario y peligroso.
     const input: CrearPedidoInput = {
       id: body.id,
       folio: body.folio,
+      fechaOperativa: body.fechaOperativa,
+      catalogoVersion: body.catalogoVersion,
       sucursalId: dispositivo.sucursalId,
       dispositivoId: dispositivo.id,
       ...(clienteId !== undefined && { clienteId }),

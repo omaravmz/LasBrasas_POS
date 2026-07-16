@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { getCatalogFromDB } from "../sync/catalogSync.js";
 import { getLocalDB } from "../db/db.js";
-import type { CategoriaLocal, ProductoLocal } from "../db/types.js";
+import type { CategoriaLocal, ProductoLocal, GrupoCorteLocal } from "../db/types.js";
+import { precioDeItem, totalDelBorrador } from "../services/precio.js";
 import { ConfiguradorCortes } from "./ConfiguradorCortes.js";
 import { ConfiguradorDisponibilidad } from "./ConfiguradorDisponibilidad.js";
 import { ConfiguradorPollo } from "./ConfiguradorPollo.js";
@@ -10,9 +11,12 @@ import { EditarNota } from "./EditarNota.js";
 import { VistaPreviewTicket } from "./VistaPreviewTicket.js";
 import { IcoBag, IcoMinus, IcoPlus, IcoTrash, IcoPencil, IcoPrint, IcoOnline, IcoOffline } from "./Iconos.js";
 import { type BorradorPedido, type ItemBorrador, type CorteBorrador } from "../types/pedido.js";
-import { MetodoPago, OrigenPedido, EstadoPedido } from "@brasas/shared";
-import { peekFolio, avanzarFolio } from "../services/folio.js";
-import { guardarPedido, sincronizarPedido } from "../services/pedidoService.js";
+import { MetodoPago, OrigenPedido, EstadoPedido, calcularTotal } from "@brasas/shared";
+import { peekFolio } from "../services/folio.js";
+import { diaOperativo } from "../services/diaOperativo.js";
+import { getCatalogoVersion } from "../sync/catalogSync.js";
+import { guardarPedido } from "../services/pedidoService.js";
+import { sincronizarTodo } from "../sync/colaSync.js";
 import { buildDatosImpresion, dispararImpresion, type TipoEntrega } from "../services/print.js";
 import { useOnlineStatus } from "../hooks/useOnlineStatus.js";
 import { VistaPedidos } from "./VistaPedidos.js";
@@ -90,6 +94,7 @@ export function PantallaPOS() {
   const [borrador, setBorrador] = useState<BorradorPedido>([]);
   const [modal, setModal] = useState<ModalState>(null);
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const [gruposCorte, setGruposCorte] = useState<GrupoCorteLocal[]>([]);
   const [folio, setFolio] = useState(1);
   const [sucursalId, setSucursalId] = useState("");
   const [sucursalNombre, setSucursalNombre] = useState("Sucursal");
@@ -101,7 +106,7 @@ export function PantallaPOS() {
 
   async function cargar() {
     const db = await getLocalDB();
-    const [{ categorias: cats, productos: prods }, ovs, nextFolio, sid, snombre] = await Promise.all([
+    const [{ categorias: cats, productos: prods, gruposCorte: gc }, ovs, nextFolio, sid, snombre] = await Promise.all([
       getCatalogFromDB(),
       leerOverrides(),
       peekFolio(),
@@ -110,6 +115,7 @@ export function PantallaPOS() {
     ]);
     setCategorias(cats);
     setProductos(prods);
+    setGruposCorte(gc);
     setOverrides(ovs);
     setFolio(nextFolio);
     if (sid) setSucursalId(sid);
@@ -127,15 +133,22 @@ export function PantallaPOS() {
   }));
 
   // Cortes únicos extraídos de todos los productos (para el panel de disponibilidad)
-  const cortesUnicos: { nombre: string; grupoPrecio: number }[] = [];
+  const ordenDeGrupo = (id: string): number =>
+    gruposCorte.find((g) => g.id === id)?.orden ?? 99;
+
+  const cortesUnicos: { nombre: string; grupoCorteId: string }[] = [];
   for (const p of productos) {
     for (const v of p.variantes) {
-      if (v.grupoPrecio != null && !cortesUnicos.some((c) => c.nombre === v.nombre)) {
-        cortesUnicos.push({ nombre: v.nombre, grupoPrecio: v.grupoPrecio });
+      if (v.grupoCorteId != null && !cortesUnicos.some((c) => c.nombre === v.nombre)) {
+        cortesUnicos.push({ nombre: v.nombre, grupoCorteId: v.grupoCorteId });
       }
     }
   }
-  cortesUnicos.sort((a, b) => a.grupoPrecio - b.grupoPrecio || a.nombre.localeCompare(b.nombre));
+  cortesUnicos.sort(
+    (a, b) =>
+      ordenDeGrupo(a.grupoCorteId) - ordenDeGrupo(b.grupoCorteId) ||
+      a.nombre.localeCompare(b.nombre),
+  );
 
   async function toggleCorteGlobal(nombre: string) {
     const actual = nombre in overrides ? (overrides[nombre] ?? true) : true;
@@ -210,7 +223,17 @@ export function PantallaPOS() {
 
   async function confirmarCobro(metodoPago: MetodoPago, opciones: OpcionesPedido) {
     const { tipoEntrega, clienteId, nombreRecoger, horaRecoger, direccionEntrega, referenciaEntrega } = opciones;
-    const folioAsignado = await avanzarFolio();
+
+    // El folio se deriva de los pedidos ya guardados: no hay contador aparte que pueda
+    // desviarse de los datos. Ver BD-03.
+    const folioAsignado = await peekFolio();
+
+    // La terminal estampa el día de operación. El servidor no lo deduce del momento en
+    // que recibe el pedido — si lo hiciera, una venta sincronizada de madrugada caería
+    // en el día siguiente y descuadraría dos cortes de caja. Ver BD-02.
+    const fechaOperativa = diaOperativo();
+    const catalogoVersion = await getCatalogoVersion();
+
     const ahora = new Date().toISOString();
     const origenDB = tipoEntrega === "DOMICILIO" ? OrigenPedido.DELIVERY
       : tipoEntrega === "RECOGER" ? OrigenPedido.TELEFONO
@@ -227,6 +250,8 @@ export function PantallaPOS() {
     const pedido = {
       id: crypto.randomUUID(),
       folio: folioAsignado,
+      fechaOperativa,
+      catalogoVersion,
       sucursalId,
       ...(clienteId !== undefined && { clienteId }),
       ...(nombreRecoger !== undefined && { notas: nombreRecoger }),
@@ -234,7 +259,13 @@ export function PantallaPOS() {
       origen: origenDB,
       estado: EstadoPedido.PENDIENTE,
       metodoPago,
-      total: borrador.reduce((s, i) => s + i.producto.precio * i.cantidad, 0),
+      // El precio de un paquete de carne depende del GRUPO del corte elegido (BD-13), así
+      // que el total sale de precioDeItem, no de producto.precio.
+      //
+      // La suma es en centavos enteros, no en punto flotante: el servidor valida que el
+      // total coincida exactamente con la suma de las líneas (en Decimal), y un total como
+      // 665.5000000000001 haría que RECHAZARA una venta legítima que el cliente ya pagó.
+      total: totalDelBorrador(borrador),
       creadoEn: ahora,
       actualizadoEn: ahora,
       sincronizado: false,
@@ -242,7 +273,7 @@ export function PantallaPOS() {
         id: item.id,
         productoId: item.producto.id,
         cantidad: item.cantidad,
-        precioUnitario: item.producto.precio,
+        precioUnitario: precioDeItem(item),
         ...(item.notas !== undefined && { notas: item.notas }),
         selecciones: item.cortes.map((c) => ({
           id: crypto.randomUUID(),
@@ -253,7 +284,10 @@ export function PantallaPOS() {
     };
 
     await guardarPedido(pedido);
-    void sincronizarPedido(pedido);
+    // La venta ya está guardada en local: lo que sigue es en segundo plano y no puede
+    // bloquear el cobro. Se drena la cola entera y en orden —no solo este pedido—
+    // porque la apertura del día tiene que llegar al servidor antes que las ventas.
+    void sincronizarTodo();
 
     const datosImpresion = buildDatosImpresion(
       borrador, folioAsignado, sucursalNombre, origenDB, metodoPago,
@@ -267,7 +301,7 @@ export function PantallaPOS() {
   }
 
   const totalItems = borrador.reduce((s, i) => s + i.cantidad, 0);
-  const totalMoney = borrador.reduce((s, i) => s + i.producto.precio * i.cantidad, 0);
+  const totalMoney = totalDelBorrador(borrador);
   const fecha = new Date().toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "short" });
 
   return (
@@ -392,7 +426,7 @@ export function PantallaPOS() {
                         <span className="meta italic">"{item.notas}"</span>
                       )}
                     </div>
-                    <div className="price">{fmt(item.producto.precio * item.cantidad)}</div>
+                    <div className="price">{fmt(precioDeItem(item) * item.cantidad)}</div>
                     <div className="controls">
                       <button onClick={() => cambiarCantidad(item.id, -1)} title="Restar">
                         <IcoMinus size={14} />
@@ -435,6 +469,7 @@ export function PantallaPOS() {
         {modal?.tipo === "cortes" && (
           <ConfiguradorCortes
             producto={modal.producto}
+            gruposCorte={gruposCorte}
             onConfirmar={(cortes, cantidad, notas) =>
               agregarItem(modal.producto, cortes, cantidad, notas)}
             onCancelar={() => setModal(null)}
@@ -485,6 +520,7 @@ export function PantallaPOS() {
         {modal?.tipo === "disponibilidad" && (
           <ConfiguradorDisponibilidad
             cortes={cortesUnicos}
+            gruposCorte={gruposCorte}
             overrides={overrides}
             onToggle={(nombre) => void toggleCorteGlobal(nombre)}
             onCerrar={() => setModal(null)}

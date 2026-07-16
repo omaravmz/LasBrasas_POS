@@ -18,13 +18,10 @@ export async function getPedidosActivos(
         estado: { not: "CANCELADO" },
         creadoEn: { gte: inicioDia },
       },
-      include: {
-        items: {
-          include: {
-            producto: { select: { nombre: true } },
-          },
-        },
-      },
+      // El nombre sale del SNAPSHOT del ítem (BD-15), no del catálogo actual. Si se leyera
+      // `producto.nombre`, renombrar un producto cambiaría retroactivamente lo que dicen
+      // los pedidos ya vendidos y sus tickets.
+      include: { items: true },
       orderBy: { creadoEn: "asc" },
     });
 
@@ -41,7 +38,7 @@ export async function getPedidosActivos(
         items: p.items.map((i) => ({
           id: i.id,
           cantidad: i.cantidad,
-          productoNombre: i.producto.nombre,
+          productoNombre: i.nombreProducto,
           ...(i.notas !== null && { notas: i.notas }),
         })),
       }))
