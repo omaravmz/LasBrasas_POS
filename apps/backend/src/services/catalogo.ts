@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 
 // Versión del catálogo (BD-04). Fila única, id = 1.

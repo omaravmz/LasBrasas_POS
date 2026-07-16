@@ -5,6 +5,7 @@ import {
   grupoDeLinea,
   resolverPrecios,
   validarAritmetica,
+  validarProporciones,
   type LineaPedido,
   type ProductoCatalogo,
   type VarianteCatalogo,
@@ -310,5 +311,77 @@ describe("resolverPrecios — catálogo desactualizado (venta offline)", () => {
     );
 
     expect(code).toBe("CATALOGO_INCONSISTENTE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RN-02 — Proporciones de los cortes
+// ---------------------------------------------------------------------------
+
+describe("validarProporciones (RN-02)", () => {
+  function codigoDe(fn: () => void): string | undefined {
+    try {
+      fn();
+      return undefined;
+    } catch (err) {
+      return err instanceof AppError ? err.code : "NO_APP_ERROR";
+    }
+  }
+
+  it("acepta un ítem sin cortes (nada que sumar)", () => {
+    expect(() => validarProporciones([{ productoId: REFRESCO, proporciones: [] }])).not.toThrow();
+  });
+
+  it("acepta un solo corte con proporción 1.000", () => {
+    expect(() => validarProporciones([{ productoId: PAQUETE, proporciones: [1] }])).not.toThrow();
+  });
+
+  it("acepta una mezcla mitad y mitad", () => {
+    expect(() =>
+      validarProporciones([{ productoId: PAQUETE, proporciones: [0.5, 0.5] }]),
+    ).not.toThrow();
+  });
+
+  it("acepta tres tercios que suman 1.000 exacto (sin error de flotante)", () => {
+    // 0.333 + 0.333 + 0.334 = 1.000 en Decimal; en flotante daría 0.9999999999999999.
+    expect(() =>
+      validarProporciones([{ productoId: PAQUETE, proporciones: [0.333, 0.333, 0.334] }]),
+    ).not.toThrow();
+  });
+
+  it("rechaza cuando las proporciones no suman 1.000", () => {
+    expect(codigoDe(() => validarProporciones([{ productoId: PAQUETE, proporciones: [0.5, 0.4] }]))).toBe(
+      "VALIDATION_ERROR",
+    );
+  });
+
+  it("rechaza cuando suman más de 1.000", () => {
+    expect(
+      codigoDe(() => validarProporciones([{ productoId: PAQUETE, proporciones: [0.6, 0.6] }])),
+    ).toBe("VALIDATION_ERROR");
+  });
+
+  it("rechaza una proporción de cero", () => {
+    expect(codigoDe(() => validarProporciones([{ productoId: PAQUETE, proporciones: [1, 0] }]))).toBe(
+      "VALIDATION_ERROR",
+    );
+  });
+
+  it("rechaza una proporción negativa", () => {
+    expect(
+      codigoDe(() => validarProporciones([{ productoId: PAQUETE, proporciones: [1.5, -0.5] }])),
+    ).toBe("VALIDATION_ERROR");
+  });
+
+  it("valida cada ítem del pedido de forma independiente", () => {
+    // El primero cuadra; el segundo no. Debe fallar por el segundo.
+    expect(
+      codigoDe(() =>
+        validarProporciones([
+          { productoId: PAQUETE, proporciones: [1] },
+          { productoId: "otro-paquete", proporciones: [0.5, 0.3] },
+        ]),
+      ),
+    ).toBe("VALIDATION_ERROR");
   });
 });

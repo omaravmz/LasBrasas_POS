@@ -22,9 +22,10 @@ export function App() {
         setAppState("sincronizando");
         await syncCatalog();
       } else {
-        // Ya tenemos datos locales — arrancar de inmediato, sync silencioso
+        // Ya tenemos datos locales — arrancar de inmediato. El refresco del catálogo lo
+        // hace PantallaPOS al montar (carga local → sync → relee), para que los datos
+        // frescos se reflejen en pantalla y no solo en la base.
         setAppState("listo");
-        syncCatalog().catch(console.warn);
       }
 
       setAppState("listo");

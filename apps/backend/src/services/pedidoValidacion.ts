@@ -119,6 +119,56 @@ export function validarAritmetica(lineas: readonly LineaPedido[], total: number)
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Proporciones de los cortes (RN-02)
+// ---------------------------------------------------------------------------
+//
+// En un ítem con cortes, las proporciones deben sumar EXACTAMENTE 1.000 y cada una debe
+// ser mayor que cero. No es cosmético: la proporción es cómo se reparte el descuento de
+// inventario de una mezcla (Fase 2, IngredienteReceta.esVariable). Una suma distinta de
+// 1.000 descontaría de menos o de más, y un pedido con una mezcla incoherente entraría a
+// la contabilidad. Se enforza en el servidor —no solo en la UI del POS— igual que RN-01.
+//
+// Es puro y no toca la base: recibe las proporciones ya extraídas y decide. Un ítem sin
+// cortes (una bebida, un pollo) no tiene nada que validar.
+
+export interface ItemProporciones {
+  productoId: string;
+  proporciones: readonly number[];
+}
+
+export function validarProporciones(items: readonly ItemProporciones[]): void {
+  for (const item of items) {
+    if (item.proporciones.length === 0) continue; // sin cortes: nada que sumar
+
+    for (const p of item.proporciones) {
+      if (!Number.isFinite(p) || p <= 0) {
+        throw new AppError(
+          "VALIDATION_ERROR",
+          `Proporción inválida en el producto ${item.productoId}: debe ser mayor que cero`,
+          400,
+          { productoId: item.productoId, proporcion: p },
+        );
+      }
+    }
+
+    // En Decimal para no arrastrar error de flotante: 0.333 + 0.333 + 0.334 debe dar 1.000
+    // exacto, no 0.9999999999999999.
+    const suma = item.proporciones.reduce((s, p) => s.plus(new Decimal(p)), new Decimal(0));
+
+    if (!suma.equals(new Decimal(1))) {
+      // VALIDATION_ERROR: la clasificación de sync ya lo trata como permanente (no
+      // reintentable) — es un pedido malformado que necesita intervención, no un reintento.
+      throw new AppError(
+        "VALIDATION_ERROR",
+        `Las proporciones de los cortes del producto ${item.productoId} deben sumar 1.000`,
+        422,
+        { productoId: item.productoId, suma: suma.toFixed(3) },
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 2. Grupo de corte de una línea (RN-01) y precio que le corresponde (BD-13)
 // ---------------------------------------------------------------------------
 

@@ -6,12 +6,21 @@ import { obtenerCatalogoVersion } from "./catalogo.js";
 import {
   resolverPrecios,
   validarAritmetica,
+  validarProporciones,
   type LineaPedido,
   type ProductoCatalogo,
   type VarianteCatalogo,
 } from "./pedidoValidacion.js";
 import type { Decimal } from "@prisma/client/runtime/library.js";
 import type { EstadoPedido, MetodoPago, OrigenPedido, Pedido } from "@prisma/client";
+
+const ORIGENES_VALIDOS: readonly OrigenPedido[] = [
+  "MOSTRADOR",
+  "TELEFONO",
+  "WHATSAPP",
+  "DELIVERY",
+];
+const METODOS_VALIDOS: readonly MetodoPago[] = ["EFECTIVO", "TARJETA", "TRANSFERENCIA"];
 
 // Transiciones de estado permitidas, por origen del pedido.
 //
@@ -200,6 +209,46 @@ function verificarMismoPedido(existente: Pedido, input: CrearPedidoInput): Pedid
   return existente;
 }
 
+// Validación de FORMA del pedido, en el servicio y no solo en el controlador.
+//
+// postPedido ya valida la forma del request online, pero el lote de sincronización
+// (postSyncPedidos → sincronizarPedidosLote → crearPedido) NO pasa por ahí: entra directo
+// aquí. Sin esta guarda, un pedido sincronizado con un `origen` inválido o sin
+// `selecciones` reventaría con un TypeError o un error de enum de Prisma —un
+// INTERNAL_ERROR ilegible que la cola clasificaría como reintentable— en vez de un
+// VALIDATION_ERROR claro y permanente.
+function validarEstructura(input: CrearPedidoInput): void {
+  if (!ORIGENES_VALIDOS.includes(input.origen)) {
+    throw new AppError("VALIDATION_ERROR", `origen inválido: ${input.origen}`, 400, {
+      origen: input.origen,
+    });
+  }
+
+  if (!METODOS_VALIDOS.includes(input.metodoPago)) {
+    throw new AppError("VALIDATION_ERROR", `metodoPago inválido: ${input.metodoPago}`, 400, {
+      metodoPago: input.metodoPago,
+    });
+  }
+
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    throw new AppError("VALIDATION_ERROR", "El pedido no tiene líneas", 400);
+  }
+
+  for (const item of input.items) {
+    if (typeof item.productoId !== "string" || !item.productoId) {
+      throw new AppError("VALIDATION_ERROR", "Cada línea requiere un productoId", 400);
+    }
+    if (!Array.isArray(item.selecciones)) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        `La línea del producto ${item.productoId} tiene selecciones inválidas`,
+        400,
+        { productoId: item.productoId },
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Creación de pedido
 // ---------------------------------------------------------------------------
@@ -210,7 +259,11 @@ export async function crearPedido(input: CrearPedidoInput): Promise<Pedido> {
     return verificarMismoPedido(yaExiste, input);
   }
 
-  // 2. Coherencia aritmética del pedido consigo mismo. No necesita el catálogo:
+  // 2. Forma del pedido (protege también al lote de sincronización, que no pasa por el
+  //    controlador).
+  validarEstructura(input);
+
+  // 3. Coherencia aritmética del pedido consigo mismo. No necesita el catálogo:
   //    atrapa bugs de suma y redondeo incluso en ventas hechas offline con precios viejos.
   const lineas: LineaPedido[] = input.items.map((item) => ({
     productoId: item.productoId,
@@ -221,11 +274,20 @@ export async function crearPedido(input: CrearPedidoInput): Promise<Pedido> {
 
   validarAritmetica(lineas, input.total);
 
-  // 3. El día de operación tiene que existir y estar abierto.
+  // RN-02: en un ítem con cortes, las proporciones deben sumar 1.000. Se exige siempre,
+  // también offline: una mezcla incoherente nunca fue válida.
+  validarProporciones(
+    input.items.map((item) => ({
+      productoId: item.productoId,
+      proporciones: item.selecciones.map((s) => s.proporcion),
+    })),
+  );
+
+  // 4. El día de operación tiene que existir y estar abierto.
   const fecha = fechaDate(input.fechaOperativa);
   await validarDiaOperativo(input.sucursalId, fecha);
 
-  // 4. Precios: el servidor decide, no el cliente.
+  // 5. Precios: el servidor decide, no el cliente.
   //
   // Para un paquete de carne el precio depende del GRUPO del corte elegido (BD-13), así que
   // hacen falta también las variantes: sin ellas no se puede saber cuánto cuesta el paquete.
@@ -299,7 +361,7 @@ export async function crearPedido(input: CrearPedidoInput): Promise<Pedido> {
     precioUnitario: precios.lineas[i]!.precioUnitario,
   }));
 
-  // 5. Persistir.
+  // 6. Persistir.
   try {
     return await prisma.$transaction(async (tx) => {
       return tx.pedido.create({

@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { calcularEsperadoEnCaja, calcularDiferencia } from "@brasas/shared";
@@ -215,6 +216,22 @@ export interface RegistrarMovimientoInput {
   monto: number;
 }
 
+function mapearMovimiento(m: {
+  id: string;
+  tipo: TipoMovimientoCaja;
+  concepto: string;
+  monto: { toNumber(): number };
+  creadoEn: Date;
+}): MovimientoCajaInfo {
+  return {
+    id: m.id,
+    tipo: m.tipo,
+    concepto: m.concepto,
+    monto: m.monto.toNumber(),
+    creadoEn: m.creadoEn.toISOString(),
+  };
+}
+
 export async function registrarMovimiento(
   input: RegistrarMovimientoInput,
 ): Promise<MovimientoCajaInfo> {
@@ -224,34 +241,29 @@ export async function registrarMovimiento(
 
   // Idempotente: reenviar el mismo UUID (sync offline) no duplica el movimiento.
   const existente = await prisma.movimientoCaja.findUnique({ where: { id: input.id } });
-  if (existente) {
-    return {
-      id: existente.id,
-      tipo: existente.tipo,
-      concepto: existente.concepto,
-      monto: existente.monto.toNumber(),
-      creadoEn: existente.creadoEn.toISOString(),
-    };
+  if (existente) return mapearMovimiento(existente);
+
+  try {
+    const movimiento = await prisma.movimientoCaja.create({
+      data: {
+        id: input.id,
+        sucursalId: input.sucursalId,
+        fecha: fd,
+        tipo: input.tipo,
+        concepto: input.concepto,
+        monto: input.monto,
+      },
+    });
+    return mapearMovimiento(movimiento);
+  } catch (err) {
+    // Dos reenvíos concurrentes del mismo UUID: el otro ganó la carrera entre el findUnique
+    // y el create. Es idempotencia, no un error — devolvemos el que quedó.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const ganador = await prisma.movimientoCaja.findUnique({ where: { id: input.id } });
+      if (ganador) return mapearMovimiento(ganador);
+    }
+    throw err;
   }
-
-  const movimiento = await prisma.movimientoCaja.create({
-    data: {
-      id: input.id,
-      sucursalId: input.sucursalId,
-      fecha: fd,
-      tipo: input.tipo,
-      concepto: input.concepto,
-      monto: input.monto,
-    },
-  });
-
-  return {
-    id: movimiento.id,
-    tipo: movimiento.tipo,
-    concepto: movimiento.concepto,
-    monto: movimiento.monto.toNumber(),
-    creadoEn: movimiento.creadoEn.toISOString(),
-  };
 }
 
 export async function eliminarMovimiento(id: string, sucursalId: string): Promise<void> {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getCatalogFromDB } from "../sync/catalogSync.js";
+import { getCatalogFromDB, syncCatalog } from "../sync/catalogSync.js";
 import { getLocalDB } from "../db/db.js";
 import type { CategoriaLocal, ProductoLocal, GrupoCorteLocal } from "../db/types.js";
 import { precioDeItem, totalDelBorrador } from "../services/precio.js";
@@ -11,13 +11,13 @@ import { EditarNota } from "./EditarNota.js";
 import { VistaPreviewTicket } from "./VistaPreviewTicket.js";
 import { IcoBag, IcoMinus, IcoPlus, IcoTrash, IcoPencil, IcoPrint, IcoOnline, IcoOffline } from "./Iconos.js";
 import { type BorradorPedido, type ItemBorrador, type CorteBorrador } from "../types/pedido.js";
-import { MetodoPago, OrigenPedido, EstadoPedido, calcularTotal } from "@brasas/shared";
+import { OrigenPedido, EstadoPedido, type MetodoPago } from "@brasas/shared";
 import { peekFolio } from "../services/folio.js";
 import { diaOperativo } from "../services/diaOperativo.js";
 import { getCatalogoVersion } from "../sync/catalogSync.js";
 import { guardarPedido } from "../services/pedidoService.js";
 import { sincronizarTodo } from "../sync/colaSync.js";
-import { buildDatosImpresion, dispararImpresion, type TipoEntrega } from "../services/print.js";
+import { buildDatosImpresion, dispararImpresion } from "../services/print.js";
 import { useOnlineStatus } from "../hooks/useOnlineStatus.js";
 import { VistaPedidos } from "./VistaPedidos.js";
 import { VistaCaja } from "./VistaCaja.js";
@@ -102,7 +102,22 @@ export function PantallaPOS() {
   const online = useOnlineStatus();
   const scale = useScale();
 
-  useEffect(() => { void cargar(); }, []);
+  useEffect(() => {
+    void (async () => {
+      // Pinta de inmediato con el catálogo local (offline-first).
+      await cargar();
+      // Luego refresca desde el servidor y vuelve a leer: si la terminal sincronizó antes
+      // de un cambio de catálogo (p. ej. la llegada de los grupos de corte, BD-13), sus
+      // datos locales están viejos y hay que releerlos tras el sync. Sin esto, el sync en
+      // segundo plano actualizaba la base pero el estado en pantalla se quedaba estancado.
+      try {
+        await syncCatalog();
+        await cargar();
+      } catch {
+        // Sin conexión: se sigue operando con el catálogo local. Es lo esperado.
+      }
+    })();
+  }, []);
 
   async function cargar() {
     const db = await getLocalDB();
@@ -120,7 +135,8 @@ export function PantallaPOS() {
     setFolio(nextFolio);
     if (sid) setSucursalId(sid);
     if (snombre) setSucursalNombre(snombre);
-    if (cats.length > 0) setCatActiva(cats[0]!.id);
+    // Al releer tras un sync no se pisa la categoría que el cajero ya tenía abierta.
+    if (cats.length > 0) setCatActiva((prev) => prev ?? cats[0]!.id);
   }
 
   // Aplica overrides de disponibilidad por NOMBRE de corte (aplica a todos los paquetes)

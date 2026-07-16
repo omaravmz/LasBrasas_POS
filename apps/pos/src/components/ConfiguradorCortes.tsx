@@ -59,9 +59,6 @@ export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCance
   const propLabel = PROP_LABEL[seleccionados.length] ?? `1/${seleccionados.length} × ${seleccionados.length}`;
 
   const todasVariantes = producto.variantes.filter((v) => v.grupoCorteId != null);
-  const variantesGrupoActivo = grupoActivo != null
-    ? todasVariantes.filter((v) => v.grupoCorteId === grupoActivo)
-    : [];
 
   // El precio del paquete depende del grupo elegido. Antes de elegir, no hay precio.
   const precio = grupoActivo != null ? precioDeGrupo(producto, grupoActivo) : 0;

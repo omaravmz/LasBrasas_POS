@@ -1,4 +1,5 @@
 import { apiFetch } from "../lib/api.js";
+import { diaOperativo } from "./diaOperativo.js";
 import type { EstadoPedido, OrigenPedido } from "@brasas/shared";
 
 export interface PedidoActivo {
@@ -19,7 +20,8 @@ export interface PedidoActivo {
 }
 
 export async function cargarPedidosActivos(): Promise<PedidoActivo[]> {
-  return apiFetch<PedidoActivo[]>("/pedidos/activos");
+  // La jornada la estampa la terminal (BD-02); el servidor filtra por ella, no por su reloj.
+  return apiFetch<PedidoActivo[]>(`/pedidos/activos?fecha=${diaOperativo()}`);
 }
 
 export async function actualizarEstado(

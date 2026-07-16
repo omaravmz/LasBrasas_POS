@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { SQLiteLocalDB } from "../impl/SQLiteLocalDB.js";
 import type { CategoriaLocal, ProductoLocal, PedidoLocal } from "../types.js";
 import { EstadoPedido, MetodoPago, OrigenPedido } from "@brasas/shared";
 
 // En Node (entorno de test), OPFS no existe: la DB opera en memoria.
-// El singleton se recrea antes de cada test con beforeEach.
+// Cada test crea su propia instancia con initDB(), así que arrancan aislados.
 
 function makeDB(): SQLiteLocalDB {
   return new SQLiteLocalDB();
