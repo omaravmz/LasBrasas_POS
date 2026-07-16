@@ -1,10 +1,12 @@
 import { useState } from "react";
-import type { ProductoLocal, VarianteLocal } from "../db/types.js";
+import type { ProductoLocal, VarianteLocal, GrupoCorteLocal } from "../db/types.js";
 import { distribuirProporciones, type CorteBorrador } from "../types/pedido.js";
+import { precioDeGrupo } from "../services/precio.js";
 import { IcoClose, IcoCheck } from "./Iconos.js";
 
 interface Props {
   producto: ProductoLocal;
+  gruposCorte: GrupoCorteLocal[];
   onConfirmar: (cortes: CorteBorrador[], cantidad: number, notas: string) => void;
   onCancelar: () => void;
 }
@@ -19,21 +21,25 @@ function fmt(n: number) {
   return "$" + n.toLocaleString("es-MX", { minimumFractionDigits: 0 });
 }
 
-export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props) {
+export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCancelar }: Props) {
   const [seleccionados, setSeleccionados] = useState<string[]>([]);
-  const [grupoActivo, setGrupoActivo] = useState<number | null>(null);
+  // El grupo activo se fija con el primer corte elegido y bloquea los del otro grupo:
+  // RN-01 (no se mezclan grupos) y, además, el precio del paquete depende de él.
+  const [grupoActivo, setGrupoActivo] = useState<string | null>(null);
   const [cantidad, setCantidad] = useState(1);
   const [notas, setNotas] = useState("");
 
-  const grupos = [1, 2].map((g) => ({
-    num: g,
-    variantes: producto.variantes.filter((v) => v.grupoPrecio === g),
-  })).filter((g) => g.variantes.length > 0);
+  const grupos = gruposCorte
+    .map((g) => ({
+      ...g,
+      variantes: producto.variantes.filter((v) => v.grupoCorteId === g.id),
+    }))
+    .filter((g) => g.variantes.length > 0);
 
   const isCutEnabled = (v: VarianteLocal) => {
     if (!v.activo) return false;
     if (grupoActivo === null) return true;
-    return v.grupoPrecio === grupoActivo;
+    return v.grupoCorteId === grupoActivo;
   };
 
   const toggleCorte = (v: VarianteLocal) => {
@@ -44,7 +50,7 @@ export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props)
         if (next.length === 0) setGrupoActivo(null);
         return next;
       }
-      if (grupoActivo === null) setGrupoActivo(v.grupoPrecio ?? null);
+      if (grupoActivo === null) setGrupoActivo(v.grupoCorteId ?? null);
       return [...prev, v.id];
     });
   };
@@ -52,10 +58,13 @@ export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props)
   const proporciones = distribuirProporciones(seleccionados.length);
   const propLabel = PROP_LABEL[seleccionados.length] ?? `1/${seleccionados.length} × ${seleccionados.length}`;
 
-  const todasVariantes = producto.variantes.filter((v) => v.grupoPrecio != null);
+  const todasVariantes = producto.variantes.filter((v) => v.grupoCorteId != null);
   const variantesGrupoActivo = grupoActivo != null
-    ? todasVariantes.filter((v) => v.grupoPrecio === grupoActivo)
+    ? todasVariantes.filter((v) => v.grupoCorteId === grupoActivo)
     : [];
+
+  // El precio del paquete depende del grupo elegido. Antes de elegir, no hay precio.
+  const precio = grupoActivo != null ? precioDeGrupo(producto, grupoActivo) : 0;
 
   const puedeConfirmar = seleccionados.length > 0;
 
@@ -79,16 +88,21 @@ export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props)
         </div>
 
         <div className="modal-body">
-          {grupos.map(({ num, variantes }) => (
-            <div className="group-block" key={num}>
+          {grupos.map((grupo) => {
+            // Cada grupo muestra SU precio: los cortes premium cuestan más, y el cajero
+            // tiene que verlo antes de elegir.
+            const precioGrupo = precioDeGrupo(producto, grupo.id);
+
+            return (
+            <div className="group-block" key={grupo.id}>
               <div className="group-label">
-                <span>Grupo {num}</span>
-                {producto.precio > 0 && (
-                  <span className="group-price">{fmt(producto.precio)}</span>
+                <span>{grupo.nombre}</span>
+                {precioGrupo > 0 && (
+                  <span className="group-price">{fmt(precioGrupo)}</span>
                 )}
               </div>
               <div className="cuts-grid">
-                {variantes.map((v) => {
+                {grupo.variantes.map((v) => {
                   const isSel = seleccionados.includes(v.id);
                   const enabled = isCutEnabled(v);
                   const cls = [
@@ -112,7 +126,8 @@ export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props)
                 })}
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {seleccionados.length > 0 && (
             <div className="mix-preview">
@@ -144,7 +159,7 @@ export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props)
               <button onClick={() => setCantidad(cantidad + 1)}>+</button>
             </div>
             <div className="total">
-              {puedeConfirmar && producto.precio > 0 ? fmt(producto.precio * cantidad) : "—"}
+              {puedeConfirmar && precio > 0 ? fmt(precio * cantidad) : "—"}
             </div>
           </div>
 
@@ -160,7 +175,7 @@ export function ConfiguradorCortes({ producto, onConfirmar, onCancelar }: Props)
           <button className="btn ghost" onClick={onCancelar}>Cancelar</button>
           <button className="btn primary" disabled={!puedeConfirmar} onClick={handleConfirmar}>
             <IcoCheck size={18} />
-            Agregar al pedido{puedeConfirmar && producto.precio > 0 ? ` · ${fmt(producto.precio * cantidad)}` : ""}
+            Agregar al pedido{puedeConfirmar && precio > 0 ? ` · ${fmt(precio * cantidad)}` : ""}
           </button>
         </div>
       </div>
