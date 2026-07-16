@@ -1,22 +1,23 @@
 import { IcoClose } from "./Iconos.js";
+import type { GrupoCorteLocal } from "../db/types.js";
 
 interface CorteUnico {
   nombre: string;
-  grupoPrecio: number;
+  grupoCorteId: string;
 }
 
 interface Props {
   cortes: CorteUnico[];
+  gruposCorte: GrupoCorteLocal[];
   overrides: Record<string, boolean>;
   onToggle: (nombre: string) => void;
   onCerrar: () => void;
 }
 
-export function ConfiguradorDisponibilidad({ cortes, overrides, onToggle, onCerrar }: Props) {
-  const grupos = [1, 2].map((g) => ({
-    num: g,
-    cortes: cortes.filter((c) => c.grupoPrecio === g),
-  })).filter((g) => g.cortes.length > 0);
+export function ConfiguradorDisponibilidad({ cortes, gruposCorte, overrides, onToggle, onCerrar }: Props) {
+  const grupos = gruposCorte
+    .map((g) => ({ ...g, cortes: cortes.filter((c) => c.grupoCorteId === g.id) }))
+    .filter((g) => g.cortes.length > 0);
 
   return (
     <div className="modal-back" onClick={onCerrar}>
@@ -30,10 +31,10 @@ export function ConfiguradorDisponibilidad({ cortes, overrides, onToggle, onCerr
         </div>
 
         <div className="modal-body">
-          {grupos.map(({ num, cortes: cortesGrupo }) => (
-            <div className="group-block" key={num}>
+          {grupos.map(({ id, nombre, cortes: cortesGrupo }) => (
+            <div className="group-block" key={id}>
               <div className="group-label">
-                <span>Grupo {num}</span>
+                <span>{nombre}</span>
               </div>
               <div className="cuts-grid">
                 {cortesGrupo.map(({ nombre }) => {
