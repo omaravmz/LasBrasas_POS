@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import {
   getEstadoCaja, getVentasDia, abrirDia, cerrarDia,
   registrarMovimiento, eliminarMovimiento,
+  TipoMovimientoCaja,
   type EstadoCaja, type CierreInfo, type VentasDia,
-  type MovimientoCaja, type TipoMovimientoCaja, type PedidoDelDia,
+  type MovimientoCaja, type PedidoDelDia,
 } from "../services/cajaService.js";
 import { actualizarEstado } from "../services/pedidoEstado.js";
 import { EstadoPedido } from "@brasas/shared";
 import { dispararImpresionCierre, type DatosCierreImpresion } from "../services/print.js";
 import { mensajeError } from "../lib/api.js";
+import { sincronizarTodo } from "../sync/colaSync.js";
 
 interface Props {
   sucursalNombre: string;
@@ -476,7 +478,7 @@ function SeccionMovimientos({
   onCambio: () => void;
 }) {
   const [movimientos, setMovimientos] = useState<MovimientoCaja[]>(estado.movimientos);
-  const [tipo, setTipo] = useState<TipoMovimientoCaja>("GASTO");
+  const [tipo, setTipo] = useState<TipoMovimientoCaja>(TipoMovimientoCaja.GASTO);
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -504,6 +506,7 @@ function SeccionMovimientos({
       setConcepto("");
       setMonto("");
       onCambio();
+      void sincronizarTodo();
     } catch (err) {
       setError(mensajeError(err, "No se pudo registrar el movimiento."));
     } finally {
@@ -517,6 +520,7 @@ function SeccionMovimientos({
       await eliminarMovimiento(id);
       setMovimientos((prev) => prev.filter((m) => m.id !== id));
       onCambio();
+      void sincronizarTodo();
     } catch (err) {
       setError(mensajeError(err, "No se pudo eliminar el movimiento."));
     }
@@ -528,9 +532,9 @@ function SeccionMovimientos({
 
       {/* Selector de tipo */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        {(["GASTO", "ENTRADA"] as const).map((t) => {
+        {([TipoMovimientoCaja.GASTO, TipoMovimientoCaja.ENTRADA] as const).map((t) => {
           const activo = tipo === t;
-          const color = t === "GASTO" ? "var(--danger)" : "var(--ok)";
+          const color = t === TipoMovimientoCaja.GASTO ? "var(--danger)" : "var(--ok)";
           return (
             <button
               key={t}
@@ -663,11 +667,16 @@ function SeccionCierre({
     setError(null);
     setEnviando(true);
     try {
+      // El cierre se calcula y se guarda en LOCAL: el corte se puede hacer e imprimir sin
+      // conexión. La cola lo envía después, y solo cuando todos los pedidos del día ya
+      // hayan sincronizado — un cierre enviado antes produciría un corte sin esas ventas.
       const cierre = await cerrarDia(
         crypto.randomUUID(),
         conteoNum,
         notas.trim() || undefined,
       );
+
+      void sincronizarTodo();
 
       // El corte se imprime con la lista de pedidos del día tal como quedó al cerrar.
       const ventasDia = await getVentasDia();
@@ -821,6 +830,9 @@ function PantallaApertura({ onAbierto }: { onAbierto: () => void }) {
     try {
       await abrirDia(crypto.randomUUID(), n, notas.trim() || undefined);
       onAbierto();
+      // La apertura debe llegar al servidor ANTES que las ventas del día: sin ella, el
+      // backend rechaza los pedidos con DIA_NO_ABIERTO. La cola la envía primero.
+      void sincronizarTodo();
     } catch (err) {
       setError(mensajeError(err, "No se pudo registrar la apertura."));
     } finally {

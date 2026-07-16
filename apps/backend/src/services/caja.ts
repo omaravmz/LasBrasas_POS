@@ -1,22 +1,25 @@
 import { prisma } from "../lib/prisma.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { calcularEsperadoEnCaja, calcularDiferencia } from "@brasas/shared";
 import type { EstadoPedido, MetodoPago, TipoMovimientoCaja } from "@prisma/client";
 
-// Mazatlan = UTC-7 (sin DST desde 2023)
-function fechaMazatlanHoy(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Mazatlan" }).format(new Date());
-}
+// El día de operación ya NO se deriva del reloj ni del timestamp de los pedidos.
+//
+// Antes, `rangoDiaUTC()` reconstruía la jornada restando 7 horas a mano a `creadoEn`.
+// Eso atribuía cada venta al día en que se CREÓ el registro, no al día de caja en que
+// realmente se hizo: un pedido sincronizado a las 00:30 caía en el día siguiente y
+// descuadraba dos cortes. Ahora todo se filtra por `Pedido.fechaOperativa`, que estampa
+// la terminal en el momento del cobro. Ver BD-02.
+//
+// La fecha viaja siempre desde la terminal, también en apertura, movimientos y cierre:
+// una operación de caja hecha offline pertenece a SU jornada, no a la del momento en que
+// logró sincronizar.
 
-// Convierte "YYYY-MM-DD" local a rango UTC para filtrar pedidos.
-// 00:00 Mazatlan (UTC-7) = 07:00 UTC
-function rangoDiaUTC(fechaStr: string): { inicio: Date; fin: Date } {
-  const inicio = new Date(`${fechaStr}T07:00:00.000Z`);
-  const fin = new Date(inicio.getTime() + 24 * 60 * 60 * 1000);
-  return { inicio, fin };
-}
-
-// Fecha como objeto Date con la parte de fecha correcta para @db.Date de Prisma
+// Fecha como objeto Date con la parte de fecha correcta para @db.Date de Prisma.
 function fechaDate(fechaStr: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaStr)) {
+    throw new AppError("VALIDATION_ERROR", `fecha inválida: ${fechaStr}`, 400);
+  }
   return new Date(`${fechaStr}T00:00:00.000Z`);
 }
 
@@ -87,22 +90,12 @@ export interface EstadoCaja {
 // ---------------------------------------------------------------------------
 // Conciliación de efectivo
 //
-// Esperado = fondo inicial + ventas en efectivo + entradas - gastos
-//
-// Los reembolsos NO se restan aquí a propósito: un pedido cancelado ya queda
-// excluido de `ventasEfectivo` (calcularVentasDia filtra CANCELADO), así que
-// restar además su reembolso descontaría el mismo dinero dos veces. Ejemplo:
-// fondo $500, venta de $100 en efectivo que luego se cancela y se devuelve.
-// El cajón vuelve a $500; con la venta ya excluida, esperado = $500. Correcto.
-// `reembolsosEfectivo` se conserva solo como dato informativo del reporte.
-export function calcularEsperadoEnCaja(
-  fondoInicial: number,
-  ventasEfectivo: number,
-  entradas: number,
-  gastos: number,
-): number {
-  return fondoInicial + ventasEfectivo + entradas - gastos;
-}
+// La fórmula NO vive aquí: vive en `@brasas/shared` porque la calculan dos lados. El POS
+// la necesita para mostrar el esperado en caja en vivo e imprimir el corte estando
+// offline; este servicio la recalcula al recibir el cierre. Con copias separadas podrían
+// divergir sin que nadie lo note, y el número que el dueño usa para confiar en el sistema
+// sería distinto según quién lo calcule.
+export { calcularEsperadoEnCaja };
 
 export function totalizarMovimientos(movimientos: MovimientoCajaInfo[]): TotalesMovimientos {
   return movimientos.reduce<TotalesMovimientos>(
@@ -122,8 +115,9 @@ export async function calcularVentasDia(
   sucursalId: string,
   fecha: string,
 ): Promise<ResumenVentas> {
-  const { inicio, fin } = rangoDiaUTC(fecha);
-  const base = { sucursalId, creadoEn: { gte: inicio, lt: fin } };
+  // Filtra por día de operación, no por rango de timestamps. Una venta hecha a las 16:00
+  // y sincronizada a las 00:30 cuenta en la jornada en que se hizo.
+  const base = { sucursalId, fechaOperativa: fechaDate(fecha) };
 
   const [efectivo, tarjeta, transfer, reembolsos, numPedidos] = await Promise.all([
     prisma.pedido.aggregate({
@@ -167,10 +161,8 @@ export async function listarPedidosDia(
   sucursalId: string,
   fecha: string,
 ): Promise<PedidoDelDia[]> {
-  const { inicio, fin } = rangoDiaUTC(fecha);
-
   const pedidos = await prisma.pedido.findMany({
-    where: { sucursalId, creadoEn: { gte: inicio, lt: fin } },
+    where: { sucursalId, fechaOperativa: fechaDate(fecha) },
     select: {
       id: true,
       folio: true,
@@ -216,6 +208,8 @@ export async function listarMovimientos(
 export interface RegistrarMovimientoInput {
   id: string;
   sucursalId: string;
+  // Día de operación al que pertenece el movimiento, estampado por la terminal.
+  fecha: string;
   tipo: TipoMovimientoCaja;
   concepto: string;
   monto: number;
@@ -224,8 +218,7 @@ export interface RegistrarMovimientoInput {
 export async function registrarMovimiento(
   input: RegistrarMovimientoInput,
 ): Promise<MovimientoCajaInfo> {
-  const fecha = fechaMazatlanHoy();
-  const fd = fechaDate(fecha);
+  const fd = fechaDate(input.fecha);
 
   await asegurarDiaAbierto(input.sucursalId, fd);
 
@@ -264,14 +257,26 @@ export async function registrarMovimiento(
 export async function eliminarMovimiento(id: string, sucursalId: string): Promise<void> {
   const movimiento = await prisma.movimientoCaja.findUnique({
     where: { id },
-    select: { id: true, sucursalId: true, fecha: true },
+    select: { id: true, sucursalId: true, fecha: true, cierreDiaId: true },
   });
 
   if (!movimiento) {
-    throw new AppError("NOT_FOUND", "Movimiento no encontrado", 404);
+    // Idempotente: si ya no está, el borrado ya se aplicó. Reenviarlo no es un error.
+    return;
   }
   if (movimiento.sucursalId !== sucursalId) {
     throw new AppError("FORBIDDEN", "El movimiento no pertenece a esta sucursal", 403);
+  }
+
+  // Un movimiento sellado por un cierre es INMUTABLE. Borrarlo cambiaría un corte que el
+  // dueño ya dio por bueno y firmó. Esta es la garantía que antes se conseguía copiando
+  // las filas a otra tabla; ahora es una regla explícita sobre una sola tabla.
+  if (movimiento.cierreDiaId !== null) {
+    throw new AppError(
+      "CONFLICT",
+      "El movimiento pertenece a un día ya cerrado y no puede modificarse",
+      409,
+    );
   }
 
   await asegurarDiaAbierto(sucursalId, movimiento.fecha);
@@ -303,8 +308,8 @@ async function asegurarDiaAbierto(sucursalId: string, fecha: Date): Promise<void
 // ---------------------------------------------------------------------------
 // Estado del día (apertura, cierre, ventas, movimientos)
 
-export async function estadoCaja(sucursalId: string): Promise<EstadoCaja> {
-  const fecha = fechaMazatlanHoy();
+// La fecha la pasa la terminal: es la única que sabe en qué jornada está operando.
+export async function estadoCaja(sucursalId: string, fecha: string): Promise<EstadoCaja> {
   const fd = fechaDate(fecha);
 
   const [apertura, cierreRow, movimientos] = await Promise.all([
@@ -313,10 +318,7 @@ export async function estadoCaja(sucursalId: string): Promise<EstadoCaja> {
     }),
     prisma.cierreDia.findUnique({
       where: { sucursalId_fecha: { sucursalId, fecha: fd } },
-      include: {
-        gastos: { orderBy: { creadoEn: "asc" } },
-        entradas: { orderBy: { creadoEn: "asc" } },
-      },
+      include: CON_MOVIMIENTOS,
     }),
     listarMovimientos(sucursalId, fecha),
   ]);
@@ -360,20 +362,27 @@ export async function estadoCaja(sucursalId: string): Promise<EstadoCaja> {
 export interface AbrirDiaInput {
   id: string;
   sucursalId: string;
+  // Día de operación que se abre, estampado por la terminal.
+  fecha: string;
   fondoInicial: number;
   notas?: string;
 }
 
 export async function abrirDia(input: AbrirDiaInput): Promise<void> {
-  const fecha = fechaMazatlanHoy();
-  const fd = fechaDate(fecha);
+  const fd = fechaDate(input.fecha);
 
   const existe = await prisma.aperturaDia.findUnique({
     where: { sucursalId_fecha: { sucursalId: input.sucursalId, fecha: fd } },
     select: { id: true },
   });
+
   if (existe) {
-    throw new AppError("CONFLICT", "Ya existe una apertura para hoy", 409);
+    // Idempotente: si es la MISMA apertura reenviada (mismo UUID de cliente), no es un
+    // error — es un reintento de sincronización. Solo es conflicto si alguien intenta
+    // abrir el mismo día dos veces con aperturas distintas (RN-08).
+    if (existe.id === input.id) return;
+
+    throw new AppError("CONFLICT", "Ya existe una apertura para ese día", 409);
   }
 
   await prisma.aperturaDia.create({
@@ -393,8 +402,17 @@ export async function abrirDia(input: AbrirDiaInput): Promise<void> {
 export interface CerrarDiaInput {
   id: string;
   sucursalId: string;
+  // Día de operación que se cierra, estampado por la terminal.
+  fecha: string;
   conteoFisico: number;
   notas?: string;
+}
+
+interface MovimientoRow {
+  id: string;
+  tipo: TipoMovimientoCaja;
+  concepto: string;
+  monto: { toNumber(): number };
 }
 
 interface CierreRow {
@@ -409,21 +427,24 @@ interface CierreRow {
   diferencia: { toNumber(): number };
   notas: string | null;
   cerradoEn: Date;
-  gastos: { id: string; concepto: string; monto: { toNumber(): number } }[];
-  entradas: { id: string; concepto: string; monto: { toNumber(): number } }[];
+  // Los movimientos que este cierre selló. Ya no hay copias en otras tablas: el desglose
+  // de gastos y entradas se deriva del tipo de cada movimiento.
+  movimientos: MovimientoRow[];
 }
 
+// Cómo incluir los movimientos sellados al leer un cierre. Se usa en todas las consultas
+// que devuelven un CierreInfo, para que el desglose siempre venga completo y ordenado.
+const CON_MOVIMIENTOS = { movimientos: { orderBy: { creadoEn: "asc" } } } as const;
+
 function mapearCierre(cierre: CierreRow): CierreInfo {
-  const gastos = cierre.gastos.map((g) => ({
-    id: g.id,
-    concepto: g.concepto,
-    monto: g.monto.toNumber(),
-  }));
-  const entradas = cierre.entradas.map((e) => ({
-    id: e.id,
-    concepto: e.concepto,
-    monto: e.monto.toNumber(),
-  }));
+  const linea = (m: MovimientoRow) => ({
+    id: m.id,
+    concepto: m.concepto,
+    monto: m.monto.toNumber(),
+  });
+
+  const gastos = cierre.movimientos.filter((m) => m.tipo === "GASTO").map(linea);
+  const entradas = cierre.movimientos.filter((m) => m.tipo === "ENTRADA").map(linea);
 
   const totalGastos = gastos.reduce((s, g) => s + g.monto, 0);
   const totalEntradas = entradas.reduce((s, e) => s + e.monto, 0);
@@ -456,7 +477,7 @@ function mapearCierre(cierre: CierreRow): CierreInfo {
 }
 
 export async function cerrarDia(input: CerrarDiaInput): Promise<CierreInfo> {
-  const fecha = fechaMazatlanHoy();
+  const fecha = input.fecha;
   const fd = fechaDate(fecha);
 
   const apertura = await prisma.aperturaDia.findUnique({
@@ -464,15 +485,20 @@ export async function cerrarDia(input: CerrarDiaInput): Promise<CierreInfo> {
     select: { fondoInicial: true },
   });
   if (!apertura) {
-    throw new AppError("PRECONDITION_FAILED", "No existe apertura para hoy", 422);
+    throw new AppError("PRECONDITION_FAILED", "No existe apertura para ese día", 422);
   }
 
   const cierreExiste = await prisma.cierreDia.findUnique({
     where: { sucursalId_fecha: { sucursalId: input.sucursalId, fecha: fd } },
-    select: { id: true },
+    include: CON_MOVIMIENTOS,
   });
+
   if (cierreExiste) {
-    throw new AppError("CONFLICT", "Ya existe un cierre para hoy", 409);
+    // Idempotente: reenviar el mismo cierre (mismo UUID) devuelve el que ya existe.
+    // Solo es conflicto si se intenta cerrar dos veces el mismo día (RN-08).
+    if (cierreExiste.id === input.id) return mapearCierre(cierreExiste);
+
+    throw new AppError("CONFLICT", "Ya existe un cierre para ese día", 409);
   }
 
   const [ventas, movimientos] = await Promise.all([
@@ -489,36 +515,44 @@ export async function cerrarDia(input: CerrarDiaInput): Promise<CierreInfo> {
     totales.entradas,
     totales.gastos,
   );
-  const diferencia = input.conteoFisico - esperadoEnCaja;
+  const diferencia = calcularDiferencia(input.conteoFisico, esperadoEnCaja);
 
-  // Los movimientos del día se copian a GastoDia/EntradaDia: el cierre queda
-  // como snapshot inmutable, independiente de la bitácora de movimientos.
-  const cierre = await prisma.cierreDia.create({
-    data: {
-      id: input.id,
-      sucursalId: input.sucursalId,
-      fecha: fd,
-      fondoInicial,
-      ventasEfectivo: ventas.ventasEfectivo,
-      ventasTarjeta: ventas.ventasTarjeta,
-      ventasTransfer: ventas.ventasTransfer,
-      totalVentas: ventas.totalVentas,
-      reembolsosEfectivo: ventas.reembolsosEfectivo,
-      conteoFisico: input.conteoFisico,
-      diferencia,
-      ...(input.notas !== undefined && { notas: input.notas }),
-      gastos: {
-        create: movimientos
-          .filter((m) => m.tipo === "GASTO")
-          .map((m) => ({ id: m.id, concepto: m.concepto, monto: m.monto })),
+  // El cierre SELLA los movimientos del día en vez de copiarlos a otras tablas.
+  //
+  // Antes se creaban filas nuevas en GastoDia/EntradaDia reutilizando el mismo UUID: dos
+  // registros del mismo hecho, en tablas distintas, sin FK que los relacionara. Ahora hay
+  // una sola fila por movimiento, y su `cierreDiaId` dice a qué corte pertenece. A partir
+  // de ese momento es inmutable (eliminarMovimiento lo rechaza).
+  //
+  // Todo en una transacción: un cierre creado sin sellar sus movimientos dejaría el corte
+  // separado de las líneas que lo componen, y esas líneas seguirían siendo editables.
+  const cierre = await prisma.$transaction(async (tx) => {
+    const creado = await tx.cierreDia.create({
+      data: {
+        id: input.id,
+        sucursalId: input.sucursalId,
+        fecha: fd,
+        fondoInicial,
+        ventasEfectivo: ventas.ventasEfectivo,
+        ventasTarjeta: ventas.ventasTarjeta,
+        ventasTransfer: ventas.ventasTransfer,
+        totalVentas: ventas.totalVentas,
+        reembolsosEfectivo: ventas.reembolsosEfectivo,
+        conteoFisico: input.conteoFisico,
+        diferencia,
+        ...(input.notas !== undefined && { notas: input.notas }),
       },
-      entradas: {
-        create: movimientos
-          .filter((m) => m.tipo === "ENTRADA")
-          .map((m) => ({ id: m.id, concepto: m.concepto, monto: m.monto })),
-      },
-    },
-    include: { gastos: true, entradas: true },
+    });
+
+    await tx.movimientoCaja.updateMany({
+      where: { sucursalId: input.sucursalId, fecha: fd, cierreDiaId: null },
+      data: { cierreDiaId: creado.id },
+    });
+
+    return tx.cierreDia.findUniqueOrThrow({
+      where: { id: creado.id },
+      include: CON_MOVIMIENTOS,
+    });
   });
 
   return mapearCierre(cierre);

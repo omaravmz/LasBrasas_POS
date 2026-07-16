@@ -22,19 +22,28 @@ const cat2: CategoriaLocal = { id: "cat-2", nombre: "Pollos", orden: 2 };
 
 const prod1: ProductoLocal = {
   id: "prod-1", categoriaId: "cat-1", nombre: "Individual",
-  precio: 130, activo: true, requiereCorte: true, gramosBase: 180, orden: 1,
-  variantes: [{ id: "v1", nombre: "Sirloin", grupoPrecio: 1, activo: true }],
+  precio: 0, activo: true, requiereCorte: true, gramosBase: 180, orden: 1,
+  variantes: [{ id: "v1", nombre: "Sirloin", grupoCorteId: "grupo-corte-1", activo: true }],
+  preciosPorGrupo: [
+    { grupoCorteId: "grupo-corte-1", precio: 130 },
+    { grupoCorteId: "grupo-corte-2", precio: 155 },
+  ],
 };
 const prod2: ProductoLocal = {
   id: "prod-2", categoriaId: "cat-2", nombre: "¼ Pollo",
   precio: 85, activo: true, requiereCorte: false, orden: 2,
   variantes: [],
+  preciosPorGrupo: [],
 };
+
+const HOY = "2026-06-15";
 
 function makePedido(overrides: Partial<PedidoLocal> = {}): PedidoLocal {
   return {
     id: "ped-001",
     folio: 1,
+    fechaOperativa: HOY,
+    catalogoVersion: 1,
     sucursalId: "suc-a",
     origen: OrigenPedido.MOSTRADOR,
     estado: EstadoPedido.PENDIENTE,
@@ -215,6 +224,123 @@ describe("Pedidos", () => {
     // Después de marcar, no debe aparecer en pendientes
     const pendientes = await db.getPedidosPendientesSync();
     expect(pendientes.find((p) => p.id === "p1")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Folio derivado de los datos (BD-03)
+// ---------------------------------------------------------------------------
+describe("getMaxFolio", () => {
+  it("devuelve 0 cuando no hay pedidos ese día", async () => {
+    const db = await initDB();
+    expect(await db.getMaxFolio(HOY)).toBe(0);
+  });
+
+  it("devuelve el folio más alto del día", async () => {
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "p1", folio: 1 }));
+    await db.guardarPedido(makePedido({ id: "p2", folio: 2 }));
+    await db.guardarPedido(makePedido({ id: "p3", folio: 3 }));
+
+    expect(await db.getMaxFolio(HOY)).toBe(3);
+  });
+
+  it("cuenta también los pedidos ya sincronizados", async () => {
+    // Un pedido sincronizado sigue habiendo consumido su folio: si lo ignoráramos,
+    // el contador retrocedería en cuanto la cola se vaciara.
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "p1", folio: 7, sincronizado: true }));
+
+    expect(await db.getMaxFolio(HOY)).toBe(7);
+  });
+
+  it("los folios de otro día no interfieren", async () => {
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "ayer", folio: 42, fechaOperativa: "2026-06-14" }));
+    await db.guardarPedido(makePedido({ id: "hoy", folio: 1, fechaOperativa: HOY }));
+
+    expect(await db.getMaxFolio(HOY)).toBe(1);
+    expect(await db.getMaxFolio("2026-06-14")).toBe(42);
+  });
+
+  it("borrar la config NO reinicia el contador", async () => {
+    // Este es el fallo que YA OCURRIÓ en producción de desarrollo: el contador vivía en
+    // una clave de config, se borró el storage, volvió a 1 y se emitieron folios
+    // duplicados en silencio. Ahora el folio sale de los pedidos: mientras los pedidos
+    // estén, el contador no puede retroceder.
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "p1", folio: 4 }));
+
+    await db.setConfig("folio_dia", "");
+    await db.setConfig("cualquier_otra_cosa", "");
+
+    expect(await db.getMaxFolio(HOY)).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cola de sincronización: FIFO y sin descartes (BD-05 / §1)
+// ---------------------------------------------------------------------------
+describe("Cola de sincronización", () => {
+  it("devuelve los pendientes en orden cronológico", async () => {
+    // El orden no es cosmético: la cola se drena en FIFO y una operación que falla
+    // bloquea a las que dependen de ella.
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "tercero", folio: 3, creadoEn: "2026-06-15T18:00:00.000Z" }));
+    await db.guardarPedido(makePedido({ id: "primero", folio: 1, creadoEn: "2026-06-15T16:00:00.000Z" }));
+    await db.guardarPedido(makePedido({ id: "segundo", folio: 2, creadoEn: "2026-06-15T17:00:00.000Z" }));
+
+    const cola = await db.getPedidosPendientesSync();
+
+    expect(cola.map((p) => p.id)).toEqual(["primero", "segundo", "tercero"]);
+  });
+
+  it("un pedido con error definitivo sale de la cola pero NO se borra", async () => {
+    // La venta ocurrió y el dinero está en el cajón: perder el registro es peor que
+    // cualquier error de sincronización.
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "roto", folio: 1 }));
+
+    await db.marcarErrorSync("roto", "FOLIO_DUPLICADO: ya existe otro pedido con ese folio");
+
+    expect(await db.getPedidosPendientesSync()).toHaveLength(0);
+
+    const conError = await db.getPedidosConError();
+    expect(conError).toHaveLength(1);
+    expect(conError[0]!.id).toBe("roto");
+    expect(conError[0]!.errorSync).toContain("FOLIO_DUPLICADO");
+    expect(conError[0]!.total).toBe(130);
+  });
+
+  it("un pedido con error no bloquea a los siguientes", async () => {
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "roto", folio: 1, creadoEn: "2026-06-15T16:00:00.000Z" }));
+    await db.guardarPedido(makePedido({ id: "sano", folio: 2, creadoEn: "2026-06-15T17:00:00.000Z" }));
+
+    await db.marcarErrorSync("roto", "FOLIO_DUPLICADO: colisión");
+
+    const cola = await db.getPedidosPendientesSync();
+    expect(cola.map((p) => p.id)).toEqual(["sano"]);
+  });
+
+  it("un pedido con error sigue contando para el folio", async () => {
+    // Aunque el servidor lo haya rechazado, el ticket se imprimió con ese folio.
+    // Reutilizarlo produciría dos tickets con el mismo número.
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "roto", folio: 5 }));
+    await db.marcarErrorSync("roto", "FOLIO_DUPLICADO");
+
+    expect(await db.getMaxFolio(HOY)).toBe(5);
+  });
+
+  it("sincronizar un pedido limpia su error previo", async () => {
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "p1" }));
+    await db.marcarErrorSync("p1", "DIA_NO_ABIERTO");
+    await db.marcarSincronizados(["p1"]);
+
+    expect(await db.getPedidosConError()).toHaveLength(0);
+    expect(await db.getPedidosPendientesSync()).toHaveLength(0);
   });
 });
 
