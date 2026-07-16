@@ -43,12 +43,56 @@ enum EstadoTraslado {
   CANCELADO
 }
 
+// Unidad CANÓNICA de almacenamiento (BD-10).
+//
+// Todo el inventario se guarda en estas unidades y solo en estas. Antes, un único enum
+// mezclaba KG con GR y LT con ML: la carne vivía en kilos y las papas en gramos, así que
+// cualquier código que sumara, comparara o convirtiera cantidades entre insumos tenía que
+// saber la unidad de cada uno. Es un bug de factor 1000 esperando a ocurrir, y el lugar
+// donde iba a ocurrir es el descuento por receta.
+//
+// Ahora la conversión pasa en los BORDES (captura y presentación), nunca en la lógica de
+// inventario. Dentro, todo es la misma escala.
+enum UnidadBase {
+  GR
+  ML
+  PIEZA
+}
+
+// Unidad de PRESENTACIÓN. Solo afecta a cómo se muestra y se captura una cantidad.
+// La carne se compra y se cuenta en kilos aunque por dentro sean gramos.
 enum Unidad {
   KG
   GR
   LT
   ML
   PIEZA
+}
+
+// Naturaleza de un movimiento de inventario (BD-09).
+enum TipoMovimientoInventario {
+  ENTRADA // compra o reposición
+  VENTA // descuento por receta al vender
+  CANCELACION // reversión del descuento de una venta cancelada
+  CONSUMO_EMPLEADO // comida del personal: descuenta inventario, no afecta caja
+  TRASLADO_SALIDA // sale de la sucursal origen
+  TRASLADO_ENTRADA // entra a la sucursal destino
+  TRANSFORMACION_ORIGEN // se consume (pollo crudo)
+  TRANSFORMACION_DESTINO // se produce (pollo asado)
+  AJUSTE // corrección manual de un conteo
+  MERMA // pérdida
+}
+
+// Qué operación originó un movimiento. Junto con refId permite rastrear cada gramo hasta
+// su causa, y hace la sincronización idempotente sin esfuerzo.
+enum TipoReferencia {
+  PEDIDO
+  TRASLADO
+  TRANSFORMACION
+  CONSUMO_EMPLEADO
+  ENTRADA_INVENTARIO
+  AJUSTE_MANUAL
+  CIERRE_DIA
 }
 
 enum TipoInsumo {
@@ -72,16 +116,18 @@ model Sucursal {
   id     String @id @default(uuid())
   nombre String
 
-  dispositivos      Dispositivo[]
-  pedidos           Pedido[]
-  inventarioInsumos InventarioInsumo[]
-  trasladosOrigen   Traslado[]             @relation("TrasladoOrigen")
-  trasladosDestino  Traslado[]             @relation("TrasladoDestino")
-  transformaciones  TransformacionInsumo[]
-  consumosEmpleado  ConsumoEmpleado[]
-  cierresDia        CierreDia[]
-  aperturasDia      AperturaDia[]
-  movimientosCaja   MovimientoCaja[]
+  dispositivos               Dispositivo[]
+  pedidos                    Pedido[]
+  inventarioInsumos          InventarioInsumo[]
+  movimientosInventario      MovimientoInventario[]
+  trasladosOrigen            Traslado[]                @relation("TrasladoOrigen")
+  trasladosDestino           Traslado[]                @relation("TrasladoDestino")
+  transformaciones           TransformacionInsumo[]
+  transformacionesPermitidas TransformacionPermitida[]
+  consumosEmpleado           ConsumoEmpleado[]
+  cierresDia                 CierreDia[]
+  aperturasDia               AperturaDia[]
+  movimientosCaja            MovimientoCaja[]
 }
 
 model Dispositivo {
@@ -108,40 +154,104 @@ model Usuario {
 // ---------------------------------------------------------------------------
 
 model Categoria {
-  id     String @id @default(uuid())
+  id     String  @id @default(uuid())
   nombre String
   orden  Int
+  // BD-16: con las FK en RESTRICT, una categoría no se puede borrar. Sin esta bandera
+  // tampoco se podía ocultar: quedaba atrapada en el POS para siempre.
+  activo Boolean @default(true)
+
+  // BD-17: sin estas marcas no hay forma de hacer un pull incremental del catálogo — la
+  // terminal tiene que descargarlo entero en cada sincronización.
+  creadoEn      DateTime @default(now()) @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
 
   productos Producto[]
 }
 
 model Producto {
-  id            String  @id @default(uuid())
-  categoriaId   String
-  nombre        String
-  descripcion   String?
-  precio        Decimal @db.Decimal(10, 2)
+  id          String  @id @default(uuid())
+  categoriaId String
+  nombre      String
+  descripcion String?
+
+  // Precio de los productos SIN corte (bebidas, pollos, extras). Para los que llevan
+  // `requiereCorte = true`, el precio depende del grupo elegido: sale de
+  // PrecioProductoGrupo. Ver BD-13.
+  precio Decimal @db.Decimal(10, 2)
+
   activo        Boolean @default(true)
   requiereCorte Boolean @default(false)
   gramosBase    Int?
   orden         Int
 
-  categoria   Categoria          @relation(fields: [categoriaId], references: [id])
-  variantes   ProductoVariante[]
-  receta      Receta?
-  itemsPedido ItemPedido[]
-  consumos    ConsumoEmpleado[]
+  creadoEn      DateTime @default(now()) @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
+
+  categoria       Categoria             @relation(fields: [categoriaId], references: [id])
+  variantes       ProductoVariante[]
+  preciosPorGrupo PrecioProductoGrupo[]
+  // La receta del producto: sus líneas de ingrediente. Ya no pasa por una tabla `Receta`
+  // intermedia (BD-18).
+  receta          IngredienteReceta[]
+  itemsPedido     ItemPedido[]
+  consumos        ConsumoEmpleado[]
+
+  @@index([categoriaId])
 }
 
 model ProductoVariante {
-  id          String  @id @default(uuid())
-  productoId  String
-  nombre      String
-  grupoPrecio Int?
-  activo      Boolean @default(true)
+  id         String  @id @default(uuid())
+  productoId String
+  nombre     String
+  activo     Boolean @default(true)
+
+  // Grupo de corte al que pertenece esta variante. Solo los cortes de carne lo tienen;
+  // aderezos y tamaños de bebida son null.
+  //
+  // Antes era `grupoPrecio Int?`: los valores 1 y 2 no significaban nada para la base y
+  // nada impedía un `grupoPrecio = 7`. Ver BD-13.
+  grupoCorteId String?
+
+  creadoEn      DateTime @default(now()) @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
 
   producto    Producto            @relation(fields: [productoId], references: [id])
+  grupoCorte  GrupoCorte?         @relation(fields: [grupoCorteId], references: [id])
   selecciones SeleccionVariante[]
+
+  @@index([productoId])
+}
+
+// Grupo de cortes de carne. Los cortes de un mismo grupo comparten precio y se pueden
+// mezclar entre sí (RN-01); los de grupos distintos, no.
+model GrupoCorte {
+  id     String @id @default(uuid())
+  nombre String @unique // "Grupo 1", "Grupo 2"
+  orden  Int
+
+  variantes ProductoVariante[]
+  precios   PrecioProductoGrupo[]
+}
+
+// Precio de un paquete de carne SEGÚN el grupo de corte elegido.
+//
+// El Grupo 2 (Cabrería, Rib Eye) es más caro que el Grupo 1, y el sobreprecio NO es plano:
+// depende del paquete, porque escala con la cantidad de carne. Un paquete de 6 personas con
+// Rib Eye cuesta bastante más que uno individual con Rib Eye.
+//
+// `Producto.precio` sigue siendo el precio de los productos SIN corte (bebidas, pollos,
+// extras). Para un producto con `requiereCorte = true`, el precio sale de aquí.
+model PrecioProductoGrupo {
+  id           String  @id @default(uuid())
+  productoId   String
+  grupoCorteId String
+  precio       Decimal @db.Decimal(10, 2)
+
+  producto   Producto   @relation(fields: [productoId], references: [id])
+  grupoCorte GrupoCorte @relation(fields: [grupoCorteId], references: [id])
+
+  @@unique([productoId, grupoCorteId])
 }
 
 // ---------------------------------------------------------------------------
@@ -149,28 +259,58 @@ model ProductoVariante {
 // ---------------------------------------------------------------------------
 
 model Insumo {
-  id               String   @id @default(uuid())
-  nombre           String
-  unidad           Unidad
-  tipo             TipoInsumo
-  esDiario         Boolean  @default(false)
-  rendimientoBolsa Decimal? @db.Decimal(10, 3)
+  id     String     @id @default(uuid())
+  nombre String
+  tipo   TipoInsumo
+
+  // Unidad en la que se ALMACENA. Todo el inventario, las recetas y los movimientos usan
+  // esta escala. Ver BD-10.
+  unidadBase UnidadBase
+
+  // Unidad en la que se MUESTRA y se captura. La carne se cuenta en kilos aunque por
+  // dentro sean gramos. La conversión ocurre solo en los bordes.
+  unidadDisplay Unidad
+
+  esDiario Boolean @default(false)
+
+  // Cantidad (en unidadBase) que rinde una unidad de compra. Ej: bolsa de papas = 1750 gr.
+  rendimientoBolsa Decimal? @db.Decimal(12, 3)
+
+  activo Boolean @default(true)
+
+  creadoEn      DateTime @default(now()) @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
 
   ingredientesReceta      IngredienteReceta[]
   inventarios             InventarioInsumo[]
-  transformacionesOrigen  TransformacionInsumo[] @relation("InsumoOrigen")
-  transformacionesDestino TransformacionInsumo[] @relation("InsumoDestino")
+  movimientos             MovimientoInventario[]
+  transformacionesOrigen  TransformacionInsumo[]    @relation("InsumoOrigen")
+  transformacionesDestino TransformacionInsumo[]    @relation("InsumoDestino")
+  permitidasOrigen        TransformacionPermitida[] @relation("PermitidaOrigen")
+  permitidasDestino       TransformacionPermitida[] @relation("PermitidaDestino")
   traslados               Traslado[]
   bolsasSobrantes         BolsaSobrante[]
+
+  @@unique([nombre])
 }
 
+// Saldo DERIVADO del libro mayor (BD-09).
+//
+// Esta tabla ya no es la verdad: es una vista materializada de MovimientoInventario, que
+// se actualiza en la MISMA transacción que asienta el movimiento. La verdad —y la única
+// fuente reconstruible— es el ledger.
+//
+// Antes, `cantidad` era un saldo mutable sin historia: no había forma de responder "¿por
+// qué el inventario dice 3.2 kg?", ni de reconstruirlo, ni de revertir con confianza el
+// descuento de una venta cancelada (RN-05) salvo recalculando la receta, que pudo haber
+// cambiado desde la venta.
 model InventarioInsumo {
   id               String   @id @default(uuid())
   sucursalId       String
   insumoId         String
-  cantidad         Decimal  @db.Decimal(10, 3)
-  umbralAlerta     Decimal? @db.Decimal(10, 3)
-  ultimoMovimiento DateTime @default(now())
+  cantidad         Decimal  @db.Decimal(12, 3)
+  umbralAlerta     Decimal? @db.Decimal(12, 3)
+  ultimoMovimiento DateTime @default(now()) @db.Timestamptz(3)
 
   sucursal Sucursal @relation(fields: [sucursalId], references: [id])
   insumo   Insumo   @relation(fields: [insumoId], references: [id])
@@ -178,23 +318,94 @@ model InventarioInsumo {
   @@unique([sucursalId, insumoId])
 }
 
-model Receta {
+// Libro mayor de inventario: append-only (BD-09).
+//
+// Cada fila es un hecho inmutable: "en tal sucursal, tal insumo, cambió esta cantidad,
+// por esta causa". Nada se edita ni se borra; una corrección es otro movimiento.
+//
+// `cantidad` lleva SIGNO: positiva entra, negativa sale.
+//
+// El par (refTipo, refId) apunta a la operación que lo originó, así que cada gramo se
+// puede rastrear hasta su causa. Y la restricción única sobre esa referencia hace la
+// sincronización offline idempotente sin esfuerzo: reasentar el mismo movimiento no
+// duplica el descuento.
+model MovimientoInventario {
   id         String @id @default(uuid())
-  productoId String @unique
+  sucursalId String
+  insumoId   String
 
-  producto     Producto            @relation(fields: [productoId], references: [id])
-  ingredientes IngredienteReceta[]
+  cantidad Decimal                  @db.Decimal(12, 3) // con signo: + entra, - sale
+  tipo     TipoMovimientoInventario
+
+  refTipo TipoReferencia
+  refId   String // uuid de la operación que lo originó
+
+  fecha          DateTime @default(now()) @db.Timestamptz(3)
+  fechaOperativa DateTime @db.Date // jornada a la que pertenece; la estampa la terminal
+  notas          String?
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  insumo   Insumo   @relation(fields: [insumoId], references: [id])
+
+  // Idempotencia: la misma operación no puede asentar dos veces el mismo efecto sobre el
+  // mismo insumo en la misma sucursal. `tipo` entra en la clave porque una misma operación
+  // puede producir movimientos distintos: un traslado genera SALIDA en origen y ENTRADA en
+  // destino; una cancelación referencia el mismo pedido que la venta que revierte.
+  @@unique([refTipo, refId, sucursalId, insumoId, tipo], map: "MovimientoInventario_ref_key")
+  @@index([sucursalId, insumoId])
+  @@index([sucursalId, fechaOperativa])
 }
 
+// Transformaciones válidas entre insumos (BD-11).
+//
+// Antes, la regla "solo Pollo Crudo → Pollo Asado, y solo en Sucursal B" vivía en prosa
+// (CONTEXT.md §5.2) y en la lógica. Nada en la base impedía una transformación absurda, y
+// cambiar la regla exigía desplegar código.
+model TransformacionPermitida {
+  id              String  @id @default(uuid())
+  insumoOrigenId  String
+  insumoDestinoId String
+  // Sucursal donde se permite. Null = en cualquiera.
+  sucursalId      String?
+  // Cuántas unidades de destino produce una de origen. Pollo crudo → asado es 1:1.
+  factor          Decimal @default(1) @db.Decimal(10, 4)
+  activo          Boolean @default(true)
+
+  insumoOrigen  Insumo    @relation("PermitidaOrigen", fields: [insumoOrigenId], references: [id])
+  insumoDestino Insumo    @relation("PermitidaDestino", fields: [insumoDestinoId], references: [id])
+  sucursal      Sucursal? @relation(fields: [sucursalId], references: [id])
+
+  @@unique([insumoOrigenId, insumoDestinoId, sucursalId])
+}
+
+// La receta de un producto: qué insumos consume al venderse.
+//
+// Ya NO existe una tabla `Receta` intermedia (BD-18). Era 1-a-1 con Producto y su única
+// columna propia era `productoId`: una entidad sin atributos que añadía un join a cada
+// consulta de receta sin aportar nada. La receta de un producto son, simplemente, sus
+// líneas de ingrediente.
 model IngredienteReceta {
-  id         String  @id @default(uuid())
-  recetaId   String
+  id         String @id @default(uuid())
+  productoId String
   insumoId   String
-  cantidad   Decimal @db.Decimal(10, 3)
+
+  // En la unidadBase del insumo (gramos, mililitros o piezas). Nunca en la de display.
+  cantidad Decimal @db.Decimal(12, 3)
+
+  // true si el insumo concreto depende de la variante elegida (ej. el corte de carne).
+  // El descuento se reparte según SeleccionVariante.proporcion.
   esVariable Boolean @default(false)
 
-  receta Receta @relation(fields: [recetaId], references: [id])
-  insumo Insumo @relation(fields: [insumoId], references: [id])
+  creadoEn      DateTime @default(now()) @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
+
+  producto Producto @relation(fields: [productoId], references: [id])
+  insumo   Insumo   @relation(fields: [insumoId], references: [id])
+
+  // BD-12: un insumo no puede aparecer dos veces en la receta del mismo producto — se
+  // descontaría dos veces.
+  @@unique([productoId, insumoId])
+  @@index([insumoId])
 }
 
 model TransformacionInsumo {
@@ -202,10 +413,11 @@ model TransformacionInsumo {
   sucursalId      String
   insumoOrigenId  String
   insumoDestinoId String
-  cantidadOrigen  Decimal  @db.Decimal(10, 3)
-  cantidadDestino Decimal  @db.Decimal(10, 3)
+  cantidadOrigen  Decimal  @db.Decimal(12, 3)
+  cantidadDestino Decimal  @db.Decimal(12, 3)
   tanda           Int?
-  fecha           DateTime @default(now())
+  fecha           DateTime @default(now()) @db.Timestamptz(3)
+  fechaOperativa  DateTime @db.Date
   notas           String?
 
   sucursal      Sucursal @relation(fields: [sucursalId], references: [id])
@@ -221,7 +433,10 @@ model Cliente {
   id       String   @id @default(uuid())
   telefono String   @unique
   nombre   String?
-  creadoEn DateTime @default(now())
+  // BD-16: con las FK en RESTRICT no se puede borrar un cliente que tenga pedidos. Sin
+  // esta bandera tampoco se podía dar de baja.
+  activo   Boolean  @default(true)
+  creadoEn DateTime @default(now()) @db.Timestamptz(3)
 
   direcciones DireccionCliente[]
   pedidos     Pedido[]
@@ -235,6 +450,8 @@ model DireccionCliente {
   esPrincipal Boolean @default(false)
 
   cliente Cliente @relation(fields: [clienteId], references: [id])
+
+  @@index([clienteId])
 }
 
 // ---------------------------------------------------------------------------
@@ -242,34 +459,71 @@ model DireccionCliente {
 // ---------------------------------------------------------------------------
 
 model Pedido {
-  id              String       @id @default(uuid())
-  folio           Int
-  sucursalId      String
-  dispositivoId   String?
-  clienteId       String?
+  id            String  @id @default(uuid())
+  folio         Int
+  sucursalId    String
+  dispositivoId String?
+  clienteId     String?
+
+  // Día de operación al que pertenece la venta. Lo estampa la TERMINAL en el momento
+  // del cobro, no el servidor: si el servidor lo derivara al sincronizar, un pedido
+  // que llega a las 00:30 caería en el día siguiente. El servidor lo valida contra la
+  // AperturaDia correspondiente. Ver DISENO_BLOQUE1.md §2 (BD-02).
+  fechaOperativa DateTime @db.Date
+
+  // Versión del catálogo que la terminal usó para cotizar este pedido. Permite
+  // distinguir "el cliente calculó mal el precio" (rechazo) de "el precio cambió
+  // mientras la terminal estaba offline" (se acepta el precio histórico y se marca).
+  // 0 = pedido anterior al versionado de catálogo. Ver DISENO_BLOQUE1.md §4 (BD-04).
+  catalogoVersion Int
+
+  // true si el pedido se cotizó con un catálogo desactualizado. Informativo para el dueño.
+  preciosDesactualizados Boolean @default(false)
+
   origen          OrigenPedido
   estado          EstadoPedido @default(PENDIENTE)
   metodoPago      MetodoPago?
   total           Decimal      @db.Decimal(10, 2)
-  horaRecoleccion DateTime?
-  horaInicioPrep  DateTime?
+  horaRecoleccion DateTime?    @db.Timestamptz(3)
+  horaInicioPrep  DateTime?    @db.Timestamptz(3)
   reembolsado     Boolean      @default(false)
   montoReembolso  Decimal?     @db.Decimal(10, 2)
-  fechaReembolso  DateTime?
+  fechaReembolso  DateTime?    @db.Timestamptz(3)
   notas           String?
-  creadoEn        DateTime     @default(now())
-  actualizadoEn   DateTime     @updatedAt
+  creadoEn        DateTime     @default(now()) @db.Timestamptz(3)
+  actualizadoEn   DateTime     @updatedAt @db.Timestamptz(3)
 
   sucursal    Sucursal     @relation(fields: [sucursalId], references: [id])
   dispositivo Dispositivo? @relation(fields: [dispositivoId], references: [id])
   cliente     Cliente?     @relation(fields: [clienteId], references: [id])
   items       ItemPedido[]
+
+  // BD-03: el folio es único por sucursal y día de operación. RN-03 enforzada en la base.
+  @@unique([sucursalId, fechaOperativa, folio])
+  @@index([sucursalId, fechaOperativa])
+  @@index([clienteId])
+}
+
+// Contador global del catálogo. Se incrementa en CADA escritura de catálogo (alta,
+// baja, cambio de precio o de disponibilidad de Producto / ProductoVariante /
+// Categoria). Fila única: id siempre 1, garantizado por CHECK en la migración.
+model CatalogoVersion {
+  id      Int @id @default(1)
+  version Int @default(1)
 }
 
 model ItemPedido {
-  id             String  @id @default(uuid())
-  pedidoId       String
-  productoId     String
+  id         String @id @default(uuid())
+  pedidoId   String
+  productoId String
+
+  // Snapshot del nombre al momento de la venta (BD-15). Lo escribe el SERVIDOR.
+  //
+  // El precio histórico ya se congelaba, pero el nombre no: renombrar un producto
+  // reescribía retroactivamente los tickets y los reportes de todos los pedidos pasados.
+  // Un ticket impreso es un documento; tiene que poder reimprimirse idéntico.
+  nombreProducto String
+
   cantidad       Int
   precioUnitario Decimal @db.Decimal(10, 2)
   notas          String?
@@ -277,16 +531,29 @@ model ItemPedido {
   pedido      Pedido              @relation(fields: [pedidoId], references: [id])
   producto    Producto            @relation(fields: [productoId], references: [id])
   selecciones SeleccionVariante[]
+
+  @@index([pedidoId])
+  @@index([productoId])
 }
 
 model SeleccionVariante {
-  id           String  @id @default(uuid())
+  id           String @id @default(uuid())
   itemPedidoId String
   varianteId   String
-  proporcion   Decimal @db.Decimal(4, 3) @default(1.000)
+
+  // Snapshot del nombre del corte al momento de la venta (BD-15).
+  nombreVariante String
+
+  proporcion Decimal @default(1.000) @db.Decimal(4, 3)
 
   itemPedido ItemPedido       @relation(fields: [itemPedidoId], references: [id])
   variante   ProductoVariante @relation(fields: [varianteId], references: [id])
+
+  // BD-12: el mismo corte no puede seleccionarse dos veces en el mismo ítem — las
+  // proporciones dejarían de sumar 1.000 de forma coherente y el descuento de inventario
+  // se repartiría mal.
+  @@unique([itemPedidoId, varianteId])
+  @@index([itemPedidoId])
 }
 
 // ---------------------------------------------------------------------------
@@ -294,15 +561,16 @@ model SeleccionVariante {
 // ---------------------------------------------------------------------------
 
 model Traslado {
-  id           String         @id @default(uuid())
-  origenId     String
-  destinoId    String
-  insumoId     String
-  cantidad     Decimal        @db.Decimal(10, 3)
-  estado       EstadoTraslado @default(PENDIENTE)
-  solicitadoEn DateTime       @default(now())
-  confirmadoEn DateTime?
-  notas        String?
+  id             String         @id @default(uuid())
+  origenId       String
+  destinoId      String
+  insumoId       String
+  cantidad       Decimal        @db.Decimal(12, 3)
+  estado         EstadoTraslado @default(PENDIENTE)
+  solicitadoEn   DateTime       @default(now()) @db.Timestamptz(3)
+  fechaOperativa DateTime       @db.Date
+  confirmadoEn   DateTime?      @db.Timestamptz(3)
+  notas          String?
 
   origen  Sucursal @relation("TrasladoOrigen", fields: [origenId], references: [id])
   destino Sucursal @relation("TrasladoDestino", fields: [destinoId], references: [id])
@@ -319,15 +587,27 @@ model AperturaDia {
   fecha        DateTime @db.Date
   fondoInicial Decimal  @db.Decimal(10, 2)
   notas        String?
-  abiertoEn    DateTime @default(now())
+  abiertoEn    DateTime @default(now()) @db.Timestamptz(3)
 
   sucursal Sucursal @relation(fields: [sucursalId], references: [id])
 
   @@unique([sucursalId, fecha])
 }
 
-// Entradas y retiros de efectivo registrados en vivo durante el día.
-// Al cerrar, se copian a GastoDia/EntradaDia como snapshot inmutable del cierre.
+// Entradas y retiros de efectivo del día. UNA sola tabla para el concepto entero.
+//
+// Antes había tres: MovimientoCaja (bitácora viva) y GastoDia / EntradaDia (snapshot del
+// cierre). GastoDia y EntradaDia eran idénticas salvo `fotoTicket`, y el cierre copiaba
+// las filas REUTILIZANDO EL MISMO UUID — dos filas en tablas distintas con el mismo id,
+// sin ninguna FK que declarara esa relación. Una auditoría encontró que el vínculo ya se
+// había roto: había gastos sin su movimiento correspondiente.
+//
+// Ahora el ciclo de vida es explícito:
+//   cierreDiaId = NULL  → movimiento vivo, se puede editar y borrar.
+//   cierreDiaId != NULL → sellado por el cierre. Inmutable.
+//
+// La inmutabilidad del corte se logra bloqueando la escritura sobre lo sellado, no
+// duplicando filas.
 model MovimientoCaja {
   id         String             @id @default(uuid())
   sucursalId String
@@ -335,11 +615,17 @@ model MovimientoCaja {
   tipo       TipoMovimientoCaja
   concepto   String
   monto      Decimal            @db.Decimal(10, 2)
-  creadoEn   DateTime           @default(now())
+  fotoTicket String? // URL en Supabase Storage (solo gastos)
+  creadoEn   DateTime           @default(now()) @db.Timestamptz(3)
 
-  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  // Cierre que selló este movimiento. Null mientras el día sigue abierto.
+  cierreDiaId String?
+
+  sucursal  Sucursal   @relation(fields: [sucursalId], references: [id])
+  cierreDia CierreDia? @relation(fields: [cierreDiaId], references: [id])
 
   @@index([sucursalId, fecha])
+  @@index([cierreDiaId])
 }
 
 model CierreDia {
@@ -351,59 +637,44 @@ model CierreDia {
   ventasTarjeta      Decimal  @db.Decimal(10, 2)
   ventasTransfer     Decimal  @db.Decimal(10, 2)
   totalVentas        Decimal  @db.Decimal(10, 2)
-  reembolsosEfectivo Decimal  @db.Decimal(10, 2) @default(0)
+  reembolsosEfectivo Decimal  @default(0) @db.Decimal(10, 2)
   conteoFisico       Decimal  @db.Decimal(10, 2)
   diferencia         Decimal  @db.Decimal(10, 2)
   mermaPollo         Int?
   notas              String?
-  cerradoEn          DateTime @default(now())
+  cerradoEn          DateTime @default(now()) @db.Timestamptz(3)
 
-  sucursal        Sucursal        @relation(fields: [sucursalId], references: [id])
-  gastos          GastoDia[]
-  entradas        EntradaDia[]
+  sucursal        Sucursal         @relation(fields: [sucursalId], references: [id])
+  // Los movimientos que este cierre selló. Sustituyen a las antiguas GastoDia/EntradaDia:
+  // ya no se copian filas, se marcan las que existen.
+  movimientos     MovimientoCaja[]
   bolsasSobrantes BolsaSobrante[]
 
   @@unique([sucursalId, fecha])
-}
-
-model GastoDia {
-  id          String   @id @default(uuid())
-  cierreDiaId String
-  concepto    String
-  monto       Decimal  @db.Decimal(10, 2)
-  fotoTicket  String?
-  creadoEn    DateTime @default(now())
-
-  cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])
-}
-
-model EntradaDia {
-  id          String   @id @default(uuid())
-  cierreDiaId String
-  concepto    String
-  monto       Decimal  @db.Decimal(10, 2)
-  creadoEn    DateTime @default(now())
-
-  cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])
 }
 
 model BolsaSobrante {
   id          String  @id @default(uuid())
   cierreDiaId String
   insumoId    String
-  peso        Decimal @db.Decimal(6, 3)
+  // En la unidadBase del insumo (gramos). Decimal(6,3) topaba en 999.999: en gramos, una
+  // bolsa de 5 kg desbordaba. Ahora Decimal(12,3), como el resto del inventario.
+  peso        Decimal @db.Decimal(12, 3)
 
   cierreDia CierreDia @relation(fields: [cierreDiaId], references: [id])
   insumo    Insumo    @relation(fields: [insumoId], references: [id])
+
+  @@index([cierreDiaId])
 }
 
 model ConsumoEmpleado {
-  id         String   @id @default(uuid())
-  sucursalId String
-  productoId String
-  cantidad   Int      @default(1)
-  fecha      DateTime @default(now())
-  notas      String?
+  id             String   @id @default(uuid())
+  sucursalId     String
+  productoId     String
+  cantidad       Int      @default(1)
+  fecha          DateTime @default(now()) @db.Timestamptz(3)
+  fechaOperativa DateTime @db.Date
+  notas          String?
 
   sucursal Sucursal @relation(fields: [sucursalId], references: [id])
   producto Producto @relation(fields: [productoId], references: [id])

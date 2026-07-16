@@ -1,4 +1,5 @@
 import { PrismaClient, Unidad, TipoInsumo } from "@prisma/client";
+import { aUnidadBase, unidadBaseDe } from "@brasas/shared";
 import { randomUUID } from "crypto";
 
 const prisma = new PrismaClient();
@@ -150,6 +151,20 @@ async function main() {
     "Carne Asada 6 personas": 1.0,
   };
 
+  // Grupos de corte (BD-13). Los cortes de un mismo grupo comparten precio y se pueden
+  // mezclar entre sí; los de grupos distintos, no (RN-01).
+  const grupo1 = await prisma.grupoCorte.upsert({
+    where: { id: "grupo-corte-1" },
+    update: {},
+    create: { id: "grupo-corte-1", nombre: "Grupo 1", orden: 1 },
+  });
+
+  const grupo2 = await prisma.grupoCorte.upsert({
+    where: { id: "grupo-corte-2" },
+    update: {},
+    create: { id: "grupo-corte-2", nombre: "Grupo 2", orden: 2 },
+  });
+
   // Cortes Grupo 1: Diezmillo, Sirloin, New York
   const corteG1 = [
     { nombre: "Diezmillo", insumo: "Carne Diezmillo" },
@@ -178,66 +193,81 @@ async function main() {
       },
     });
 
-    // Variantes: cortes Grupo 1
-    for (const corte of corteG1) {
-      await prisma.productoVariante.upsert({
-        where: { id: `var-g1-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}` },
-        update: {},
-        create: {
-          id: `var-g1-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}`,
-          productoId: producto.id,
-          nombre: corte.nombre,
-          grupoPrecio: 1,
-        },
-      });
+    // Variantes: cortes de cada grupo. El grupo es una FK, no un entero suelto (BD-13).
+    for (const [prefijo, grupo, cortes] of [
+      ["g1", grupo1, corteG1],
+      ["g2", grupo2, corteG2],
+    ] as const) {
+      for (const corte of cortes) {
+        const id = `var-${prefijo}-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}`;
+
+        await prisma.productoVariante.upsert({
+          where: { id },
+          update: { grupoCorteId: grupo.id },
+          create: {
+            id,
+            productoId: producto.id,
+            nombre: corte.nombre,
+            grupoCorteId: grupo.id,
+          },
+        });
+      }
     }
 
-    // Variantes: cortes Grupo 2
-    for (const corte of corteG2) {
-      await prisma.productoVariante.upsert({
-        where: { id: `var-g2-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}` },
+    // Precio del paquete SEGÚN el grupo de corte (BD-13).
+    //
+    // El negocio confirmó que el Grupo 2 (Cabrería, Rib Eye) cuesta más que el Grupo 1, y
+    // que el sobreprecio depende del paquete (escala con la cantidad de carne). Pero los
+    // precios reales del Grupo 2 NO están definidos todavía: son un dato del negocio.
+    //
+    // Se siembran AMBOS grupos con el precio actual del paquete —es exactamente lo que el
+    // sistema cobraba hasta ahora— y quedan listos para diferenciarse en cuanto el negocio
+    // entregue los precios. No se inventa un sobreprecio.
+    for (const grupo of [grupo1, grupo2]) {
+      await prisma.precioProductoGrupo.upsert({
+        where: {
+          productoId_grupoCorteId: { productoId: producto.id, grupoCorteId: grupo.id },
+        },
         update: {},
         create: {
-          id: `var-g2-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}`,
+          id: `ppg-${paquete.orden}-${grupo.orden}`,
           productoId: producto.id,
-          nombre: corte.nombre,
-          grupoPrecio: 2,
+          grupoCorteId: grupo.id,
+          precio: paquete.precio, // TODO negocio: el Grupo 2 debe costar más
         },
       });
     }
 
     // Receta
-    const carneCrudaKg = carnesCrudasKg[paquete.nombre] ?? 0;
-    const tortillasKg = tortillasPorPaquete[paquete.nombre] ?? 0;
-    const frijoles = frijolesPorPaquete[paquete.nombre] ?? 0;
+    // Las recetas se escriben en la unidad canónica del insumo: la carne y las tortillas
+    // en gramos, los frijoles en mililitros. Las constantes de arriba están en las
+    // unidades del negocio (kg, lt) y se convierten aquí, en el borde.
+    const carneCruda = aUnidadBase(carnesCrudasKg[paquete.nombre] ?? 0, Unidad.KG);
+    const tortillas = aUnidadBase(tortillasPorPaquete[paquete.nombre] ?? 0, Unidad.KG);
+    const frijoles = aUnidadBase(frijolesPorPaquete[paquete.nombre] ?? 0, Unidad.LT);
 
-    const receta = await prisma.receta.upsert({
-      where: { productoId: producto.id },
-      update: {},
-      create: { id: randomUUID(), productoId: producto.id },
-    });
 
     // Ingrediente de carne (esVariable: el descuento se reparte según proporción de corte)
     await prisma.ingredienteReceta.upsert({
       where: { id: `ing-carne-${paquete.orden}` },
-      update: { cantidad: carneCrudaKg },
+      update: { cantidad: carneCruda },
       create: {
         id: `ing-carne-${paquete.orden}`,
-        recetaId: receta.id,
+        productoId: producto.id,
         insumoId: insumoMap["Carne Diezmillo"]!.id, // insumo base; el descuento real usa la variante seleccionada
-        cantidad: carneCrudaKg,
+        cantidad: carneCruda,
         esVariable: true,
       },
     });
 
     await prisma.ingredienteReceta.upsert({
       where: { id: `ing-tort-${paquete.orden}` },
-      update: { cantidad: tortillasKg },
+      update: { cantidad: tortillas },
       create: {
         id: `ing-tort-${paquete.orden}`,
-        recetaId: receta.id,
+        productoId: producto.id,
         insumoId: insumoMap["Tortillas"]!.id,
-        cantidad: tortillasKg,
+        cantidad: tortillas,
         esVariable: false,
       },
     });
@@ -247,7 +277,7 @@ async function main() {
       update: { cantidad: frijoles },
       create: {
         id: `ing-frijoles-${paquete.orden}`,
-        recetaId: receta.id,
+        productoId: producto.id,
         insumoId: insumoMap["Frijoles"]!.id,
         cantidad: frijoles,
         esVariable: false,
@@ -280,31 +310,29 @@ async function main() {
       },
     });
 
-    const receta = await prisma.receta.upsert({
-      where: { productoId: producto.id },
-      update: {},
-      create: { id: randomUUID(), productoId: producto.id },
-    });
 
     await prisma.ingredienteReceta.upsert({
       where: { id: `ing-pollo-asado-${paquete.orden}` },
       update: { cantidad: paquete.fraccion },
       create: {
         id: `ing-pollo-asado-${paquete.orden}`,
-        recetaId: receta.id,
+        productoId: producto.id,
         insumoId: insumoMap["Pollo Asado"]!.id,
         cantidad: paquete.fraccion,
       },
     });
 
+    // Las tortillas del paquete están en kg; el insumo se almacena en gramos.
+    const tortillasPollo = aUnidadBase(paquete.tortillas, Unidad.KG);
+
     await prisma.ingredienteReceta.upsert({
       where: { id: `ing-tort-pollo-${paquete.orden}` },
-      update: { cantidad: paquete.tortillas },
+      update: { cantidad: tortillasPollo },
       create: {
         id: `ing-tort-pollo-${paquete.orden}`,
-        recetaId: receta.id,
+        productoId: producto.id,
         insumoId: insumoMap["Tortillas"]!.id,
-        cantidad: paquete.tortillas,
+        cantidad: tortillasPollo,
       },
     });
   }
@@ -332,17 +360,31 @@ async function main() {
       },
     });
 
-    const receta = await prisma.receta.upsert({
-      where: { productoId: producto.id },
-      update: {},
-      create: { id: randomUUID(), productoId: producto.id },
-    });
 
+    // Cada cantidad se convierte desde la unidad en que la piensa el negocio a la unidad
+    // canónica del insumo: las piezas se quedan en piezas, las tortillas pasan de kg a
+    // gramos, las papas ya están en gramos, y la sopa pasa de litros a mililitros.
     const ingredientes = [
-      { id: `ing-piezas-${paquete.orden}`, insumo: "Paquete Piezas Asado", cantidad: paquete.fraccion },
-      { id: `ing-tort-piezas-${paquete.orden}`, insumo: "Tortillas", cantidad: paquete.tortillas },
-      { id: `ing-papas-piezas-${paquete.orden}`, insumo: "Papas a la Francesa", cantidad: paquete.papas },
-      { id: `ing-sopa-piezas-${paquete.orden}`, insumo: "Sopa Fría", cantidad: paquete.sopa },
+      {
+        id: `ing-piezas-${paquete.orden}`,
+        insumo: "Paquete Piezas Asado",
+        cantidad: aUnidadBase(paquete.fraccion, Unidad.PIEZA),
+      },
+      {
+        id: `ing-tort-piezas-${paquete.orden}`,
+        insumo: "Tortillas",
+        cantidad: aUnidadBase(paquete.tortillas, Unidad.KG),
+      },
+      {
+        id: `ing-papas-piezas-${paquete.orden}`,
+        insumo: "Papas a la Francesa",
+        cantidad: aUnidadBase(paquete.papas, Unidad.GR),
+      },
+      {
+        id: `ing-sopa-piezas-${paquete.orden}`,
+        insumo: "Sopa Fría",
+        cantidad: aUnidadBase(paquete.sopa, Unidad.LT),
+      },
     ];
 
     for (const ing of ingredientes) {
@@ -351,7 +393,7 @@ async function main() {
         update: { cantidad: ing.cantidad },
         create: {
           id: ing.id,
-          recetaId: receta.id,
+          productoId: producto.id,
           insumoId: insumoMap[ing.insumo]!.id,
           cantidad: ing.cantidad,
         },
@@ -430,6 +472,38 @@ async function main() {
   }
 
   console.log("✓ Productos: Bebidas");
+
+  // ---------------------------------------------------------------------------
+  // Transformaciones permitidas (BD-11)
+  // ---------------------------------------------------------------------------
+  // La regla "solo pollo crudo → asado, y solo en Sucursal B" vivía en prosa y en la
+  // lógica del código. Ahora vive en la base: se puede cambiar sin desplegar, y nada
+  // impide que el sistema rechace una transformación absurda.
+  //
+  // Sucursal B (Villas del Río) tiene el único asadero de pollos. Ambas conversiones son
+  // 1:1 — un pollo crudo produce un pollo asado.
+  const transformaciones = [
+    { origen: "Pollo Crudo", destino: "Pollo Asado" },
+    { origen: "Paquete Piezas Crudo", destino: "Paquete Piezas Asado" },
+  ];
+
+  for (const t of transformaciones) {
+    const id = `transf-${t.origen.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 24)}`;
+
+    await prisma.transformacionPermitida.upsert({
+      where: { id },
+      update: { activo: true },
+      create: {
+        id,
+        insumoOrigenId: insumoMap[t.origen]!.id,
+        insumoDestinoId: insumoMap[t.destino]!.id,
+        sucursalId: sucursalB.id, // solo el asadero
+        factor: 1,
+      },
+    });
+  }
+
+  console.log("✓ Transformaciones permitidas (solo Sucursal B)");
   console.log("\nSeed completado.");
 }
 
@@ -437,18 +511,36 @@ async function main() {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// El seed es un BORDE del sistema: aquí los datos se escriben como los piensa el negocio
+// (la carne en kilos, los frijoles en litros) y se convierten a la unidad canónica de
+// almacenamiento. Dentro del sistema, todo son gramos, mililitros y piezas. Ver BD-10.
 async function upsertInsumo(
   nombre: string,
-  unidad: Unidad,
+  unidadDisplay: Unidad,
   tipo: TipoInsumo,
   esDiario: boolean,
-  rendimientoBolsa: number | null
+  // En la unidad de DISPLAY: una bolsa de papas rinde 1750 gr; una de carne, 5 kg.
+  rendimientoBolsaDisplay: number | null
 ) {
   const id = `insumo-${nombre.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`;
+
+  const rendimientoBolsa =
+    rendimientoBolsaDisplay === null
+      ? null
+      : aUnidadBase(rendimientoBolsaDisplay, unidadDisplay);
+
   return prisma.insumo.upsert({
     where: { id },
-    update: {},
-    create: { id, nombre, unidad, tipo, esDiario, rendimientoBolsa },
+    update: { unidadDisplay, unidadBase: unidadBaseDe(unidadDisplay), rendimientoBolsa },
+    create: {
+      id,
+      nombre,
+      unidadDisplay,
+      unidadBase: unidadBaseDe(unidadDisplay),
+      tipo,
+      esDiario,
+      rendimientoBolsa,
+    },
   });
 }
 
