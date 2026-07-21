@@ -213,14 +213,25 @@ model ProductoVariante {
   // nada impedía un `grupoPrecio = 7`. Ver BD-13.
   grupoCorteId String?
 
+  // Insumo concreto que consume esta variante. Es lo que convierte "el cliente eligió Rib
+  // Eye" en "descuenta de Carne Rib Eye": sin él, un IngredienteReceta con esVariable = true
+  // no tiene de dónde descontar y el inventario por corte es inimplementable (BD-21).
+  //
+  // Opcional porque no toda variante consume un insumo propio (un tamaño de bebida, por
+  // ejemplo). Pero una variante CON grupo de corte siempre lo tiene: lo garantiza el CHECK
+  // `ProductoVariante_corte_requiere_insumo`, no la buena voluntad de quien inserta.
+  insumoId String?
+
   creadoEn      DateTime @default(now()) @db.Timestamptz(3)
   actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
 
   producto    Producto            @relation(fields: [productoId], references: [id])
   grupoCorte  GrupoCorte?         @relation(fields: [grupoCorteId], references: [id])
+  insumo      Insumo?             @relation(fields: [insumoId], references: [id])
   selecciones SeleccionVariante[]
 
   @@index([productoId])
+  @@index([insumoId])
 }
 
 // Grupo de cortes de carne. Los cortes de un mismo grupo comparten precio y se pueden
@@ -282,6 +293,7 @@ model Insumo {
   actualizadoEn DateTime @updatedAt @db.Timestamptz(3)
 
   ingredientesReceta      IngredienteReceta[]
+  variantes               ProductoVariante[]
   inventarios             InventarioInsumo[]
   movimientos             MovimientoInventario[]
   transformacionesOrigen  TransformacionInsumo[]    @relation("InsumoOrigen")

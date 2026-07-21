@@ -218,14 +218,26 @@ async function main() {
       for (const corte of cortes) {
         const id = `var-${prefijo}-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}`;
 
+        // `insumoId` es lo que permite que el descuento sepa de qué carne descontar cuando
+        // el cliente elige un corte (BD-21). Hasta ahora este dato existía en el arreglo de
+        // cortes pero no se escribía.
+        const insumo = insumoMap[corte.insumo];
+
+        if (!insumo) {
+          throw new Error(
+            `El corte "${corte.nombre}" apunta al insumo "${corte.insumo}", que no existe.`
+          );
+        }
+
         await prisma.productoVariante.upsert({
           where: { id },
-          update: { grupoCorteId: grupo.id },
+          update: { grupoCorteId: grupo.id, insumoId: insumo.id },
           create: {
             id,
             productoId: producto.id,
             nombre: corte.nombre,
             grupoCorteId: grupo.id,
+            insumoId: insumo.id,
           },
         });
       }
@@ -262,7 +274,10 @@ async function main() {
     const frijoles = aUnidadBase(frijolesPorPaquete[paquete.nombre] ?? 0, Unidad.LT);
 
 
-    // Ingrediente de carne (esVariable: el descuento se reparte según proporción de corte)
+    // Ingrediente de carne. `esVariable = true` significa que el insumo real NO es el que
+    // apunta esta fila, sino el de la variante que el cliente eligió
+    // (`ProductoVariante.insumoId`, BD-21), repartido según `SeleccionVariante.proporcion`.
+    // El insumoId de aquí es solo el marcador de posición de la línea de receta.
     await prisma.ingredienteReceta.upsert({
       where: { id: `ing-carne-${paquete.orden}` },
       update: { cantidad: carneCruda },
