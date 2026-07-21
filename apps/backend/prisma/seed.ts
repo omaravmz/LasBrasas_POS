@@ -80,6 +80,7 @@ async function main() {
     upsertInsumo("Papas a la Francesa", Unidad.GR, TipoInsumo.COMPLEMENTO, false, 1750),
     upsertInsumo("Boneless", Unidad.GR, TipoInsumo.COMPLEMENTO, false, null),
     upsertInsumo("Tenders", Unidad.GR, TipoInsumo.COMPLEMENTO, false, null),
+    upsertInsumo("Salchicha", Unidad.PIEZA, TipoInsumo.COMPLEMENTO, false, null),
     upsertInsumo("Guacamole", Unidad.PIEZA, TipoInsumo.COMPLEMENTO, false, null),
     upsertInsumo("Totopos", Unidad.PIEZA, TipoInsumo.COMPLEMENTO, false, null),
     upsertInsumo("Aderezo Ranch", Unidad.PIEZA, TipoInsumo.COMPLEMENTO, false, null),
@@ -114,13 +115,15 @@ async function main() {
   // Productos — Carne Asada
   // Los precios son placeholder: el negocio los define antes de producción.
   // ---------------------------------------------------------------------------
+  // Precios por paquete y grupo de corte — menú del negocio (julio 2026).
+  // `g1` Diezmillo/Sirloin/New York, `g2` Cabrería/Rib Eye, `g3` Puerco.
   const paquetesCarneAsada = [
-    { nombre: "Carne Asada Individual", gramosBase: 180, precio: 120, orden: 1 },
-    { nombre: "Carne Asada 2 personas", gramosBase: 330, precio: 220, orden: 2 },
-    { nombre: "Carne Asada 3 personas", gramosBase: 500, precio: 320, orden: 3 },
-    { nombre: "Carne Asada 4 personas", gramosBase: 630, precio: 410, orden: 4 },
-    { nombre: "Carne Asada 5 personas", gramosBase: 750, precio: 500, orden: 5 },
-    { nombre: "Carne Asada 6 personas", gramosBase: 1000, precio: 650, orden: 6 },
+    { nombre: "Carne Asada Individual", gramosBase: 180, orden: 1, g1: 120, g2: 135, g3: 100 },
+    { nombre: "Carne Asada 2 personas", gramosBase: 315, orden: 2, g1: 210, g2: 260, g3: 170 },
+    { nombre: "Carne Asada 3 personas", gramosBase: 500, orden: 3, g1: 280, g2: 330, g3: 230 },
+    { nombre: "Carne Asada 4 personas", gramosBase: 630, orden: 4, g1: 350, g2: 420, g3: 280 },
+    { nombre: "Carne Asada 5 personas", gramosBase: 750, orden: 5, g1: 430, g2: 510, g3: 340 },
+    { nombre: "Carne Asada 6 personas", gramosBase: 1000, orden: 6, g1: 520, g2: 600, g3: 400 },
   ];
 
   // Cantidades de carne CRUDA por paquete (datos del negocio — ajustar antes de producción)
@@ -178,15 +181,28 @@ async function main() {
     { nombre: "Rib Eye", insumo: "Carne Rib Eye" },
   ];
 
+  // Grupo 3: Puerco. El negocio confirmó que NO se mezcla con los cortes de res, así que
+  // es un grupo propio y RN-01 (no mezclar grupos distintos) lo impide sin código extra.
+  // Consume la misma cantidad de carne cruda por paquete que la res.
+  const grupo3 = await prisma.grupoCorte.upsert({
+    where: { id: "grupo-corte-3" },
+    update: {},
+    create: { id: "grupo-corte-3", nombre: "Grupo 3", orden: 3 },
+  });
+
+  const corteG3 = [{ nombre: "Puerco", insumo: "Carne de Puerco" }];
+
   for (const paquete of paquetesCarneAsada) {
     const producto = await prisma.producto.upsert({
       where: { id: `prod-carne-${paquete.orden}-000000-0000-0000-000000000000` },
-      update: { precio: paquete.precio },
+      // `Producto.precio` guarda el precio del Grupo 1 como referencia; el precio real de
+      // un paquete con corte sale siempre de PrecioProductoGrupo.
+      update: { precio: paquete.g1, gramosBase: paquete.gramosBase },
       create: {
         id: `prod-carne-${paquete.orden}-000000-0000-0000-000000000000`,
         categoriaId: catCarneAsada.id,
         nombre: paquete.nombre,
-        precio: paquete.precio,
+        precio: paquete.g1,
         requiereCorte: true,
         gramosBase: paquete.gramosBase,
         orden: paquete.orden,
@@ -197,6 +213,7 @@ async function main() {
     for (const [prefijo, grupo, cortes] of [
       ["g1", grupo1, corteG1],
       ["g2", grupo2, corteG2],
+      ["g3", grupo3, corteG3],
     ] as const) {
       for (const corte of cortes) {
         const id = `var-${prefijo}-${paquete.orden}-${corte.nombre.toLowerCase().replace(" ", "-")}`;
@@ -214,26 +231,24 @@ async function main() {
       }
     }
 
-    // Precio del paquete SEGÚN el grupo de corte (BD-13).
-    //
-    // El negocio confirmó que el Grupo 2 (Cabrería, Rib Eye) cuesta más que el Grupo 1, y
-    // que el sobreprecio depende del paquete (escala con la cantidad de carne). Pero los
-    // precios reales del Grupo 2 NO están definidos todavía: son un dato del negocio.
-    //
-    // Se siembran AMBOS grupos con el precio actual del paquete —es exactamente lo que el
-    // sistema cobraba hasta ahora— y quedan listos para diferenciarse en cuanto el negocio
-    // entregue los precios. No se inventa un sobreprecio.
-    for (const grupo of [grupo1, grupo2]) {
+    // Precio del paquete SEGÚN el grupo de corte (BD-13). Precios reales del negocio: el
+    // sobreprecio del Grupo 2 no es plano (escala con la cantidad de carne) y el Grupo 3
+    // (puerco) es más barato que ambos. Por eso el precio se modela por (producto, grupo).
+    for (const [grupo, precio] of [
+      [grupo1, paquete.g1],
+      [grupo2, paquete.g2],
+      [grupo3, paquete.g3],
+    ] as const) {
       await prisma.precioProductoGrupo.upsert({
         where: {
           productoId_grupoCorteId: { productoId: producto.id, grupoCorteId: grupo.id },
         },
-        update: {},
+        update: { precio },
         create: {
           id: `ppg-${paquete.orden}-${grupo.orden}`,
           productoId: producto.id,
           grupoCorteId: grupo.id,
-          precio: paquete.precio, // TODO negocio: el Grupo 2 debe costar más
+          precio,
         },
       });
     }
@@ -290,22 +305,24 @@ async function main() {
   // ---------------------------------------------------------------------------
   // Productos — Pollos Asados
   // ---------------------------------------------------------------------------
+  // El ¼ de pollo se vende como pierna o pechuga. Por ahora el cajero lo anota en las notas
+  // del ítem; registrarlo como variante queda pendiente (ver PLAN.md).
   const paquetesPollo = [
-    { nombre: "¼ Pollo", fraccion: 0.25, tortillas: 0.25, orden: 1 },
-    { nombre: "½ Pollo", fraccion: 0.5, tortillas: 0.5, orden: 2 },
-    { nombre: "¾ Pollo", fraccion: 0.75, tortillas: 0.5, orden: 3 },
-    { nombre: "Pollo Entero", fraccion: 1.0, tortillas: 0.5, orden: 4 },
+    { nombre: "¼ Pollo", fraccion: 0.25, tortillas: 0.25, precio: 80, orden: 1 },
+    { nombre: "½ Pollo", fraccion: 0.5, tortillas: 0.5, precio: 115, orden: 2 },
+    { nombre: "¾ Pollo", fraccion: 0.75, tortillas: 0.5, precio: 175, orden: 3 },
+    { nombre: "Pollo Entero", fraccion: 1.0, tortillas: 0.5, precio: 215, orden: 4 },
   ];
 
   for (const paquete of paquetesPollo) {
     const producto = await prisma.producto.upsert({
       where: { id: `prod-pollo-${paquete.orden}-00000-0000-0000-000000000000` },
-      update: {},
+      update: { precio: paquete.precio },
       create: {
         id: `prod-pollo-${paquete.orden}-00000-0000-0000-000000000000`,
         categoriaId: catPollos.id,
         nombre: paquete.nombre,
-        precio: 0, // precio placeholder
+        precio: paquete.precio,
         orden: paquete.orden,
       },
     });
@@ -343,19 +360,19 @@ async function main() {
   // Productos — Piezas (pierna y muslo)
   // ---------------------------------------------------------------------------
   const paquetesPiezas = [
-    { nombre: "8 Piezas", fraccion: 1.0, tortillas: 0.5, papas: 350, sopa: 0.5, orden: 1 },
-    { nombre: "4 Piezas", fraccion: 0.5, tortillas: 0.5, papas: 175, sopa: 0.25, orden: 2 },
+    { nombre: "8 Piezas", fraccion: 1.0, tortillas: 0.5, papas: 350, sopa: 0.5, precio: 260, orden: 1 },
+    { nombre: "4 Piezas", fraccion: 0.5, tortillas: 0.5, papas: 175, sopa: 0.25, precio: 130, orden: 2 },
   ];
 
   for (const paquete of paquetesPiezas) {
     const producto = await prisma.producto.upsert({
       where: { id: `prod-piezas-${paquete.orden}-0000-0000-0000-000000000000` },
-      update: {},
+      update: { precio: paquete.precio },
       create: {
         id: `prod-piezas-${paquete.orden}-0000-0000-0000-000000000000`,
         categoriaId: catPiezas.id,
         nombre: paquete.nombre,
-        precio: 0,
+        precio: paquete.precio,
         orden: paquete.orden,
       },
     });
@@ -407,40 +424,68 @@ async function main() {
   // Productos — Otros (Tortas, Boneless, Tenders)
   // ---------------------------------------------------------------------------
   const productosOtros = [
-    { id: "prod-torta-sencilla-00000-0000-0000-000000000000", nombre: "Torta de Carne Asada", orden: 1 },
-    { id: "prod-torta-papas-000-00000-0000-0000-000000000000", nombre: "Torta de Carne Asada con Papas", orden: 2 },
-    { id: "prod-boneless-000000-0000-0000-000000000000", nombre: "Boneless", orden: 3 },
-    { id: "prod-tenders-0000000-0000-0000-000000000000", nombre: "Tenders", orden: 4 },
+    { id: "prod-torta-sencilla-00000-0000-0000-000000000000", nombre: "Torta de Carne Asada", precio: 90, orden: 1 },
+    { id: "prod-torta-papas-000-00000-0000-0000-000000000000", nombre: "Torta de Carne Asada con Papas", precio: 110, orden: 2 },
+    { id: "prod-boneless-000000-0000-0000-000000000000", nombre: "Boneless", precio: 120, orden: 3 },
+    { id: "prod-tenders-0000000-0000-0000-000000000000", nombre: "Tenders", precio: 120, orden: 4 },
+    { id: "prod-salchichas-000-0000-0000-000000000000", nombre: "Orden de Salchichas Asadas", precio: 60, orden: 5 },
   ];
 
   for (const p of productosOtros) {
     await prisma.producto.upsert({
       where: { id: p.id },
-      update: {},
-      create: { id: p.id, categoriaId: catOtros.id, nombre: p.nombre, precio: 0, orden: p.orden },
+      update: { nombre: p.nombre, precio: p.precio, orden: p.orden },
+      create: { id: p.id, categoriaId: catOtros.id, nombre: p.nombre, precio: p.precio, orden: p.orden },
     });
   }
+
+  // La orden de salchichas son 6 piezas y nada más: no lleva tortillas ni guarnición.
+  // Es la única receta de esta categoría; las de tortas, boneless y tenders son Fase 2.
+  await prisma.ingredienteReceta.upsert({
+    where: { id: "ing-salchichas-1" },
+    update: { cantidad: 6 },
+    create: {
+      id: "ing-salchichas-1",
+      productoId: "prod-salchichas-000-0000-0000-000000000000",
+      insumoId: insumoMap["Salchicha"]!.id,
+      cantidad: aUnidadBase(6, Unidad.PIEZA),
+    },
+  });
 
   console.log("✓ Productos: Otros");
 
   // ---------------------------------------------------------------------------
   // Productos — Extras
   // ---------------------------------------------------------------------------
+  // Nombres tal como los usa el negocio en el menú. El orden del arreglo NO se altera:
+  // cada posición fija el id del producto, y renombrar no rompe los pedidos pasados porque
+  // ItemPedido guarda el nombre como snapshot.
+  //
+  // "Extra Papas" pasa a llamarse "Papas Fritas": el negocio confirmó que la orden suelta
+  // del menú ($45) y el extra son el mismo producto, así que no se duplica.
   const extras = [
-    "Extra Frijoles", "Extra Tortillas", "Extra Cebolla Asada", "Extra Verdura",
-    "Extra Salsa", "Extra Chiles Toreados", "Extra Papas", "Guacamole", "Totopos", "Sopa Fría",
+    { nombre: "Frijoles extra", precio: 20 },
+    { nombre: "Tortillas extra", precio: 15 },
+    { nombre: "Cebolla extra", precio: 15 },
+    { nombre: "Verdura extra", precio: 20 },
+    { nombre: "Salsa extra", precio: 15 },
+    { nombre: "Chile extra", precio: 15 },
+    { nombre: "Papas Fritas", precio: 45 },
+    { nombre: "Guacamole", precio: 70 },
+    { nombre: "Totopos", precio: 20 },
+    { nombre: "Sopa Fría", precio: 35 },
   ];
 
   for (let i = 0; i < extras.length; i++) {
-    const nombre = extras[i]!;
+    const extra = extras[i]!;
     await prisma.producto.upsert({
       where: { id: `prod-extra-${i + 1}-0000-0000-0000-000000000000` },
-      update: {},
+      update: { nombre: extra.nombre, precio: extra.precio },
       create: {
         id: `prod-extra-${i + 1}-0000-0000-0000-000000000000`,
         categoriaId: catExtras.id,
-        nombre,
-        precio: 0,
+        nombre: extra.nombre,
+        precio: extra.precio,
         orden: i + 1,
       },
     });
@@ -452,20 +497,25 @@ async function main() {
   // Productos — Bebidas
   // ---------------------------------------------------------------------------
   const bebidas = [
-    "Agua Sabor 1lt", "Refresco 600ml", "Refresco 1lt", "Refresco 2lt",
-    "Refresco 3lt", "Té 600ml", "Té 1lt",
+    { nombre: "Agua Sabor 1lt", precio: 25 },
+    { nombre: "Refresco 600ml", precio: 25 },
+    { nombre: "Refresco 1lt", precio: 30 },
+    { nombre: "Refresco 2lt", precio: 40 },
+    { nombre: "Refresco 3lt", precio: 60 },
+    { nombre: "Té 600ml", precio: 20 },
+    { nombre: "Té 1lt", precio: 30 },
   ];
 
   for (let i = 0; i < bebidas.length; i++) {
-    const nombre = bebidas[i]!;
+    const bebida = bebidas[i]!;
     await prisma.producto.upsert({
       where: { id: `prod-bebida-${i + 1}-000-0000-0000-000000000000` },
-      update: {},
+      update: { precio: bebida.precio },
       create: {
         id: `prod-bebida-${i + 1}-000-0000-0000-000000000000`,
         categoriaId: catBebidas.id,
-        nombre,
-        precio: 0,
+        nombre: bebida.nombre,
+        precio: bebida.precio,
         orden: i + 1,
       },
     });
@@ -504,6 +554,20 @@ async function main() {
   }
 
   console.log("✓ Transformaciones permitidas (solo Sucursal B)");
+
+  // ---------------------------------------------------------------------------
+  // Versión del catálogo (BD-04)
+  // ---------------------------------------------------------------------------
+  // El seed acaba de cambiar precios, nombres y productos. Si la versión no sube, las
+  // terminales creen que su copia está al día y siguen vendiendo con los precios viejos
+  // sin que nada lo marque. Va al final: para entonces el catálogo ya está completo.
+  const catalogo = await prisma.catalogoVersion.upsert({
+    where: { id: 1 },
+    update: { version: { increment: 1 } },
+    create: { id: 1, version: 1 },
+  });
+
+  console.log(`✓ CatalogoVersion → ${catalogo.version}`);
   console.log("\nSeed completado.");
 }
 
