@@ -10,7 +10,10 @@ import { MetodoPago, EstadoPedido } from "./types/index.js";
 // confiar en el sistema sería distinto según quién lo calcule.
 //
 //   esperadoEnCaja = fondoInicial + ventasEfectivo + entradas - gastos
-//   diferencia     = conteoFisico - esperadoEnCaja
+//
+// El conteo físico del efectivo y su diferencia contra el esperado se hacen FUERA del
+// sistema, a propósito: el corte reporta el esperado en caja como referencia, pero no
+// registra ni concilia el efectivo contado.
 //
 // LOS REEMBOLSOS NO SE RESTAN, a propósito. Un pedido cancelado ya queda excluido de
 // `ventasEfectivo`, así que restar además su reembolso descontaría el mismo dinero dos
@@ -30,10 +33,6 @@ export function calcularEsperadoEnCaja(
     aCentavos(fondoInicial) + aCentavos(ventasEfectivo) + aCentavos(entradas) - aCentavos(gastos);
 
   return aPesos(centavos);
-}
-
-export function calcularDiferencia(conteoFisico: number, esperadoEnCaja: number): number {
-  return aPesos(aCentavos(conteoFisico) - aCentavos(esperadoEnCaja));
 }
 
 // ---------------------------------------------------------------------------

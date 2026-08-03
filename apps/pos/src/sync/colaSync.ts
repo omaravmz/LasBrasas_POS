@@ -109,7 +109,6 @@ async function drenar(): Promise<ResultadoCola> {
         body: JSON.stringify({
           id: cierre.id,
           fecha: cierre.fechaOperativa,
-          conteoFisico: cierre.conteoFisico,
           ...(cierre.notas !== undefined && { notas: cierre.notas }),
         }),
       });

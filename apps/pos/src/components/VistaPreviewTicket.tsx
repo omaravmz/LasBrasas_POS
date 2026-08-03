@@ -115,7 +115,6 @@ export function VistaPreviewTicket({ items, folio, sucursal, onCerrar, onConfirm
             <hr />
             <div className="row"><span>Folio</span><strong>#{String(folio).padStart(3, "0")}</strong></div>
             <div className="row"><span>Fecha</span><span>{fecha} {hora}</span></div>
-            <div className="row"><span>Terminal</span><span>POS-01</span></div>
             {tipoEntrega === "RECOGER" && (
               <>
                 <div className="row">

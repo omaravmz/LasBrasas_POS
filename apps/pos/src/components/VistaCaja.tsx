@@ -1,108 +1,120 @@
 import { useEffect, useState } from "react";
 import {
-  getEstadoCaja, getVentasDia, abrirDia, cerrarDia,
+  getEstadoCaja, getVentasDia, abrirDia, cerrarDia, getDiasSinCerrar,
   registrarMovimiento, eliminarMovimiento,
   TipoMovimientoCaja,
-  type EstadoCaja, type CierreInfo, type VentasDia,
-  type MovimientoCaja, type PedidoDelDia,
+  type EstadoCaja, type VentasDia,
 } from "../services/cajaService.js";
-import { actualizarEstado } from "../services/pedidoEstado.js";
+import { armarCorte, imprimirCorte } from "../services/corte.js";
+import { diaOperativo, fechaOperativaCorta } from "../services/diaOperativo.js";
+import { actualizarEstado, cargarPedidosActivos, type PedidoActivo } from "../services/pedidoEstado.js";
 import { EstadoPedido } from "@brasas/shared";
-import { dispararImpresionCierre, type DatosCierreImpresion } from "../services/print.js";
+import { dispararImpresionCierre } from "../services/print.js";
 import { mensajeError } from "../lib/api.js";
 import { sincronizarTodo } from "../sync/colaSync.js";
+import {
+  IcoPower, IcoSwap, IcoReceipt, IcoClose, IcoLock, IcoPrint,
+  IcoChevron, IcoChevronLeft, IcoBanknote, IcoCard, IcoCheck, IcoTrash,
+} from "./Iconos.js";
+import type { AperturaLocal } from "../db/types.js";
 
 interface Props {
   sucursalNombre: string;
-  onCerrar: () => void;
 }
 
-type Seccion = "menu" | "ventas" | "movimientos" | "cierre";
+type Sub = "hub" | "inicio" | "movimientos" | "ventas" | "cancelaciones" | "corte" | "cierre";
+
+// Motivos de cancelación definidos por el negocio. Nota: el backend NO persiste el motivo
+// todavía (no hay campo en el schema); se captura como paso deliberado del cajero.
+const MOTIVOS = ["Cliente canceló", "Error de captura"];
 
 // ---------------------------------------------------------------------------
 // Helpers de formato
-
 function peso(n: number) {
   return "$" + n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-
-function fechaLegible(iso: string) {
-  return new Date(iso).toLocaleString("es-MX", {
-    timeZone: "America/Mazatlan",
-    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-  });
+function pesoCorto(n: number) {
+  return "$" + n.toLocaleString("es-MX", { minimumFractionDigits: 0 });
 }
-
 function hora(iso: string) {
   return new Date(iso).toLocaleTimeString("es-MX", {
     timeZone: "America/Mazatlan", hour: "2-digit", minute: "2-digit",
   });
 }
-
-const ETIQUETA_METODO: Record<string, string> = {
-  EFECTIVO: "Efectivo",
-  TARJETA: "Tarjeta",
-  TRANSFERENCIA: "Transferencia",
-};
-
-// Un pedido solo se puede cancelar mientras no esté entregado ni cancelado.
-function sePuedeCancelar(p: PedidoDelDia): boolean {
-  return p.estado === "PENDIENTE" || p.estado === "LISTO";
+function fechaLegible(iso: string) {
+  return new Date(iso).toLocaleString("es-MX", {
+    timeZone: "America/Mazatlan", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
 }
 
-function generarReporte(estado: EstadoCaja, cierre: CierreInfo, sucursalNombre: string): string {
-  const difSign = cierre.diferencia >= 0 ? "SOBRA" : "FALTA";
-  const enTerminal = cierre.ventasTarjeta + cierre.ventasTransfer;
+const ETIQUETA_METODO: Record<string, string> = {
+  EFECTIVO: "Efectivo", TARJETA: "Tarjeta", TRANSFERENCIA: "Transferencia",
+};
 
-  const lines = [
-    `LAS BRASAS — ${sucursalNombre}`,
-    `Corte del ${estado.fecha}  |  ${fechaLegible(cierre.cerradoEn)}`,
-    "",
-    "═══ VENTAS DEL DÍA ═══════════════",
-    `Efectivo:       ${peso(cierre.ventasEfectivo)}`,
-    `Tarjeta:        ${peso(cierre.ventasTarjeta)}`,
-    `Transferencia:  ${peso(cierre.ventasTransfer)}`,
-    `TOTAL VENTAS:   ${peso(cierre.totalVentas)}`,
-    "",
-    "═══ CAJA ══════════════════════════",
-    `Fondo inicial:  ${peso(cierre.fondoInicial)}`,
-    ...(cierre.totalEntradas > 0 ? [`+ Entradas:     ${peso(cierre.totalEntradas)}`] : []),
-    ...(cierre.totalGastos > 0 ? [`- Gastos:       ${peso(cierre.totalGastos)}`] : []),
-    `Esperado caja:  ${peso(cierre.esperadoEnCaja)}`,
-    `En terminal:    ${peso(enTerminal)}`,
-    `Conteo físico:  ${peso(cierre.conteoFisico)}`,
-    `Diferencia:     ${cierre.diferencia >= 0 ? "+" : ""}${peso(cierre.diferencia)} (${difSign})`,
-    ...(cierre.gastos.length > 0
-      ? ["", "═══ GASTOS ═════════════════════════",
-          ...cierre.gastos.map((g) => `• ${g.concepto}: ${peso(g.monto)}`)]
-      : []),
-    ...(cierre.entradas.length > 0
-      ? ["", "═══ ENTRADAS ═══════════════════════",
-          ...cierre.entradas.map((e) => `• ${e.concepto}: ${peso(e.monto)}`)]
-      : []),
-    ...(cierre.notas ? ["", "═══ NOTAS ══════════════════════════", cierre.notas] : []),
-  ];
-  return lines.join("\n");
+// Banda de estado para turnos que quedaron sin cerrar (RN-24). Etiqueta, fechas y acción
+// en una sola fila.
+function AlertaTurnoSinCerrar({
+  pendientes, onCerrar,
+}: { pendientes: AperturaLocal[]; onCerrar: (fecha: string) => void }) {
+  const varios = pendientes.length > 1;
+
+  return (
+    <div className="turno-alerta">
+      <div className="turno-alerta-txt">
+        <div className="turno-alerta-lbl">{varios ? "Turnos sin cerrar" : "Turno sin cerrar"}</div>
+        <div className="turno-alerta-dato">
+          {pendientes.map((a) => fechaOperativaCorta(a.fechaOperativa)).join(" · ")}
+        </div>
+      </div>
+      <div className="turno-alerta-acc">
+        {pendientes.map((a) => (
+          <button className="btn" key={a.id} onClick={() => onCerrar(a.fechaOperativa)}>
+            <IcoLock size={16} />
+            {varios ? `Cerrar ${fechaOperativaCorta(a.fechaOperativa)}` : "Cerrar turno"}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Aviso de "turno cerrado" para las secciones que exigen caja abierta. Centrado y con
+// realce para que no se lea como una nota inline perdida en el panel.
+function AvisoTurno({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="sub-scroll">
+      <div className="aviso-turno">
+        <div className="aviso-ico"><IcoPower size={22} /></div>
+        <p>{children}</p>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Componente principal
-
-export function VistaCaja({ sucursalNombre, onCerrar }: Props) {
+// Componente principal — hub + sub-pantallas
+// ---------------------------------------------------------------------------
+export function VistaCaja({ sucursalNombre }: Props) {
   const [estado, setEstado] = useState<EstadoCaja | null>(null);
-  const [seccion, setSeccion] = useState<Seccion>("menu");
+  // Turnos de días anteriores que quedaron sin cerrar (RN-24). Mientras haya uno, la
+  // apertura de hoy está bloqueada, así que el hub lo muestra arriba de todo.
+  const [pendientes, setPendientes] = useState<AperturaLocal[]>([]);
+  const [sub, setSub] = useState<Sub>("hub");
+  // Fecha sobre la que operan Corte y Cierre. Normalmente hoy, pero pasa a ser la de un
+  // día pendiente cuando el encargado entra a cerrarlo desde el aviso.
+  const [fechaFoco, setFechaFoco] = useState<string>(diaOperativo());
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    void cargar();
-  }, []);
+  useEffect(() => { void cargar(); }, []);
 
   async function cargar() {
     setCargando(true);
     setError(null);
     try {
-      setEstado(await getEstadoCaja());
+      const [e, p] = await Promise.all([getEstadoCaja(), getDiasSinCerrar()]);
+      setEstado(e);
+      setPendientes(p);
     } catch (err) {
       setError(mensajeError(err, "No se pudo cargar el estado de caja."));
     } finally {
@@ -110,401 +122,252 @@ export function VistaCaja({ sucursalNombre, onCerrar }: Props) {
     }
   }
 
-  const titulo =
-    seccion === "ventas" ? "Ventas del día"
-      : seccion === "movimientos" ? "Entradas y retiros"
-        : seccion === "cierre" ? "Cierre de día"
-          : "Caja";
-
-  function volver() {
-    if (seccion === "menu") onCerrar();
-    else {
-      setSeccion("menu");
-      void cargar();
-    }
+  function volverAlHub() {
+    setSub("hub");
+    setFechaFoco(diaOperativo());
+    void cargar();
   }
 
-  return (
-    <div style={{
-      position: "absolute", inset: 0, zIndex: 20,
-      background: "var(--bg)", display: "flex", flexDirection: "column",
-    }}>
-      {/* Header */}
-      <div style={{
-        height: 56, flexShrink: 0, display: "flex", alignItems: "center",
-        gap: 16, padding: "0 20px", background: "var(--surface)",
-        borderBottom: "1px solid var(--border)",
-      }}>
-        <button onClick={volver} style={btnBorderStyle}>← Volver</button>
-        <span style={{ fontWeight: 700, fontSize: 15 }}>{titulo}</span>
-        <span style={{ fontSize: 12, color: "var(--text-3)" }}>{sucursalNombre}</span>
-        {estado && (
-          <span style={{ fontSize: 12, color: "var(--text-3)", marginLeft: "auto" }}>
-            {estado.fecha}
-          </span>
-        )}
+  if (cargando || !estado) {
+    return (
+      <div className="screen">
+        <div className="screen-head"><div><h1 className="screen-title">Caja</h1></div></div>
+        <div className="sub-scroll">
+          {error ? <div className="note-box warn">{error}</div> : <div className="muted small">Cargando…</div>}
+        </div>
       </div>
+    );
+  }
 
-      {/* Cuerpo */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 24 }}>
-        {error && <ErrorBanner mensaje={error} />}
-        {cargando && <div style={{ color: "var(--text-3)", fontSize: 14 }}>Cargando...</div>}
-
-        {!cargando && estado && (
-          <>
-            {/* Día sin abrir */}
-            {!estado.apertura && <PantallaApertura onAbierto={cargar} />}
-
-            {/* Día ya cerrado */}
-            {estado.cierre && (
-              <PantallaResumen
-                estado={estado}
-                cierre={estado.cierre}
-                sucursalNombre={sucursalNombre}
-              />
-            )}
-
-            {/* Día abierto y operando */}
-            {estado.apertura && !estado.cierre && (
-              <>
-                {seccion === "menu" && (
-                  <MenuCaja estado={estado} onIr={setSeccion} />
-                )}
-                {seccion === "ventas" && (
-                  <SeccionVentas onCambio={cargar} />
-                )}
-                {seccion === "movimientos" && (
-                  <SeccionMovimientos estado={estado} onCambio={cargar} />
-                )}
-                {seccion === "cierre" && (
-                  <SeccionCierre
-                    estado={estado}
-                    sucursalNombre={sucursalNombre}
-                    onCerrado={() => { setSeccion("menu"); void cargar(); }}
-                  />
-                )}
-              </>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Menú principal
-
-function MenuCaja({ estado, onIr }: { estado: EstadoCaja; onIr: (s: Seccion) => void }) {
+  const abierto = !!estado.apertura && !estado.cierre;
   const ventas = estado.ventasDelDia;
 
+  const ACCIONES: { id: Sub; icon: JSX.Element; titulo: string; desc: string; meta: string }[] = [
+    {
+      id: "inicio", icon: <IcoPower size={22} />, titulo: "Inicio de turno",
+      desc: "Abrir caja y registrar el fondo inicial",
+      meta: abierto ? `Abierto ${hora(estado.apertura!.abiertoEn)}` : estado.cierre ? "Día cerrado" : "Sin abrir",
+    },
+    {
+      id: "movimientos", icon: <IcoSwap size={22} />, titulo: "Entradas y salidas",
+      desc: "Retiros, depósitos y cambio adicional",
+      meta: `${estado.movimientos.length} registrado${estado.movimientos.length === 1 ? "" : "s"}`,
+    },
+    {
+      id: "ventas", icon: <IcoReceipt size={22} />, titulo: "Ventas del turno",
+      desc: "Resumen por método y lista de ventas",
+      meta: ventas ? `${pesoCorto(ventas.totalVentas)} · ${ventas.numPedidos}` : "—",
+    },
+    {
+      id: "cancelaciones", icon: <IcoClose size={22} />, titulo: "Cancelaciones",
+      desc: "Cancelar pedidos abiertos por folio",
+      meta: abierto ? "Por folio" : "Turno cerrado",
+    },
+    {
+      id: "corte", icon: <IcoPrint size={22} />, titulo: "Generar corte",
+      desc: "Conteo de control",
+      meta: estado.esperadoEnCaja != null ? `Esperado ${pesoCorto(estado.esperadoEnCaja)}` : "—",
+    },
+    {
+      id: "cierre", icon: <IcoLock size={22} />, titulo: "Cierre de turno",
+      desc: "Corte final de la jornada",
+      meta: estado.cierre ? "Cerrado" : abierto ? "Turno abierto" : "—",
+    },
+  ];
+
+  if (sub !== "hub") {
+    const acc = ACCIONES.find((a) => a.id === sub)!;
+    const esOtroDia = fechaFoco !== diaOperativo();
+    return (
+      <div className="screen">
+        <div className="sub-bar">
+          <button className="back-btn" onClick={volverAlHub}>
+            <IcoChevronLeft size={18} /> Caja
+          </button>
+          <div className="pkg-title-wrap">
+            <h1 className="pkg-title">
+              {acc.titulo}{esOtroDia ? ` · ${fechaOperativaCorta(fechaFoco)}` : ""}
+            </h1>
+          </div>
+        </div>
+        {sub === "inicio" && (
+          <SubInicio estado={estado} pendientes={pendientes} onCambio={cargar}
+            onIrACierre={(fecha) => { setFechaFoco(fecha); setSub("cierre"); }} />
+        )}
+        {sub === "movimientos" && <SubMovimientos estado={estado} onCambio={cargar} />}
+        {sub === "ventas" && <SubVentas estado={estado} />}
+        {sub === "cancelaciones" && <SubCancelaciones estado={estado} onCambio={cargar} />}
+        {sub === "corte" && <SubCorte fecha={fechaFoco} sucursalNombre={sucursalNombre} />}
+        {sub === "cierre" && (
+          <SubCierre fecha={fechaFoco} sucursalNombre={sucursalNombre} onCerrado={volverAlHub} />
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto" }}>
-      {/* Resumen compacto del estado actual */}
-      <div style={{
-        display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 24,
-      }}>
-        <Indicador
-          label="Esperado en caja"
-          valor={peso(estado.esperadoEnCaja ?? 0)}
-          destacado
-        />
-        <Indicador label="Ventas del día" valor={peso(ventas?.totalVentas ?? 0)} />
-        <Indicador label="Pedidos" valor={String(ventas?.numPedidos ?? 0)} />
+    <div className="screen">
+      <div className="screen-head">
+        <div>
+          <h1 className="screen-title">Caja</h1>
+        </div>
+        <div className="screen-head-actions">
+          {abierto
+            ? <div className="chip ok"><span className="dot" /> Turno activo</div>
+            : <div className="chip warn"><span className="dot" /> Caja cerrada</div>}
+        </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <BotonAccion
-          titulo="Ventas del día"
-          detalle="Revisar pedidos y cancelar tickets"
-          onClick={() => onIr("ventas")}
-        />
-        <BotonAccion
-          titulo="Entrada / Retiro"
-          detalle={
-            estado.movimientos.length > 0
-              ? `${estado.movimientos.length} movimiento(s) hoy`
-              : "Registrar dinero que entra o sale"
-          }
-          onClick={() => onIr("movimientos")}
-        />
-        <BotonAccion
-          titulo="Cierre de día"
-          detalle="Totalizar, conciliar e imprimir el corte"
-          onClick={() => onIr("cierre")}
-          peligro
-        />
-      </div>
-    </div>
-  );
-}
+      <div className="caja-hub">
+        {pendientes.length > 0 && (
+          <AlertaTurnoSinCerrar
+            pendientes={pendientes}
+            onCerrar={(fecha) => { setFechaFoco(fecha); setSub("cierre"); }}
+          />
+        )}
 
-function BotonAccion({
-  titulo, detalle, onClick, peligro = false,
-}: {
-  titulo: string;
-  detalle: string;
-  onClick: () => void;
-  peligro?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: "flex", alignItems: "center", gap: 16,
-        padding: "18px 20px", borderRadius: 12, cursor: "pointer",
-        background: "var(--surface)", textAlign: "left",
-        border: `1px solid ${peligro ? "var(--danger)" : "var(--border)"}`,
-        fontFamily: "var(--font)", width: "100%",
-      }}
-    >
-      <span style={{ flex: 1 }}>
-        <span style={{
-          display: "block", fontSize: 16, fontWeight: 700,
-          color: peligro ? "var(--danger)" : "var(--text)",
-        }}>
-          {titulo}
-        </span>
-        <span style={{ display: "block", fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>
-          {detalle}
-        </span>
-      </span>
-      <span style={{ fontSize: 18, color: "var(--text-3)" }}>›</span>
-    </button>
-  );
-}
-
-function Indicador({
-  label, valor, destacado = false,
-}: {
-  label: string;
-  valor: string;
-  destacado?: boolean;
-}) {
-  return (
-    <div style={{
-      padding: "14px 16px", borderRadius: 10,
-      background: "var(--surface)",
-      border: `1px solid ${destacado ? "var(--accent)" : "var(--border)"}`,
-    }}>
-      <div style={{
-        fontSize: 10, fontWeight: 700, letterSpacing: ".06em",
-        textTransform: "uppercase", color: "var(--text-3)", marginBottom: 6,
-      }}>
-        {label}
-      </div>
-      <div style={{
-        fontSize: 20, fontWeight: 700, fontVariantNumeric: "tabular-nums",
-        color: destacado ? "var(--accent)" : "var(--text)",
-      }}>
-        {valor}
+        <div className="hub-grid">
+          {ACCIONES.map((a) => (
+            <button className="hub-card" key={a.id} onClick={() => setSub(a.id)}>
+              <div className="hub-ico">{a.icon}</div>
+              <div className="hub-body">
+                <div className="hub-title">{a.titulo}</div>
+                <div className="hub-desc">{a.desc}</div>
+              </div>
+              <div className="hub-foot">
+                <span className="hub-meta">{a.meta}</span>
+                <IcoChevron size={17} />
+              </div>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Sección: Ventas del día
-
-function SeccionVentas({ onCambio }: { onCambio: () => void }) {
-  const [datos, setDatos] = useState<VentasDia | null>(null);
-  const [cargando, setCargando] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [confirmando, setConfirmando] = useState<PedidoDelDia | null>(null);
-  const [cancelando, setCancelando] = useState(false);
-
-  useEffect(() => {
-    void cargar();
-  }, []);
-
-  async function cargar() {
-    setCargando(true);
-    try {
-      setDatos(await getVentasDia());
-      setError(null);
-    } catch (err) {
-      setError(mensajeError(err, "No se pudieron cargar las ventas del día."));
-    } finally {
-      setCargando(false);
-    }
-  }
-
-  async function cancelar(pedido: PedidoDelDia) {
-    setCancelando(true);
-    setError(null);
-    try {
-      await actualizarEstado(pedido.id, EstadoPedido.CANCELADO);
-      setConfirmando(null);
-      await cargar();
-      onCambio();
-    } catch (err) {
-      setError(
-        mensajeError(err, `No se pudo cancelar el folio #${String(pedido.folio).padStart(3, "0")}.`),
-      );
-    } finally {
-      setCancelando(false);
-    }
-  }
-
-  if (cargando) return <div style={{ color: "var(--text-3)", fontSize: 14 }}>Cargando...</div>;
-  if (!datos) return <ErrorBanner mensaje={error ?? "Sin datos"} />;
-
-  const { resumen, pedidos } = datos;
-
-  return (
-    <div style={{ maxWidth: 720, margin: "0 auto" }}>
-      {error && <ErrorBanner mensaje={error} />}
-
-      <div style={{
-        display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24,
-      }}>
-        <Indicador label="Pedidos" valor={String(resumen.numPedidos)} />
-        <Indicador label="Efectivo" valor={peso(resumen.ventasEfectivo)} />
-        <Indicador label="Tarjeta" valor={peso(resumen.ventasTarjeta)} />
-        <Indicador label="Transferencia" valor={peso(resumen.ventasTransfer)} />
-      </div>
-
-      <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "baseline",
-        marginBottom: 12,
-      }}>
-        <SectionTitle>Pedidos del día</SectionTitle>
-        <span style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-          Total: {peso(resumen.totalVentas)}
-        </span>
-      </div>
-
-      {pedidos.length === 0 && (
-        <div style={{ color: "var(--text-3)", fontSize: 13 }}>Aún no hay pedidos hoy.</div>
-      )}
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {pedidos.map((p) => {
-          const cancelado = p.estado === "CANCELADO";
-          return (
-            <div
-              key={p.id}
-              style={{
-                display: "flex", alignItems: "center", gap: 12,
-                padding: "10px 14px", borderRadius: 8,
-                background: "var(--surface)", border: "1px solid var(--border)",
-                opacity: cancelado ? 0.55 : 1,
-              }}
-            >
-              <span style={{
-                fontWeight: 700, fontVariantNumeric: "tabular-nums", minWidth: 52,
-              }}>
-                #{String(p.folio).padStart(3, "0")}
-              </span>
-
-              <span style={{ fontSize: 13, color: "var(--text-3)", minWidth: 100 }}>
-                {p.metodoPago ? ETIQUETA_METODO[p.metodoPago] : "Sin cobrar"}
-              </span>
-
-              <span style={{ fontSize: 12, color: "var(--text-3)" }}>{hora(p.creadoEn)}</span>
-
-              <span style={{ flex: 1 }} />
-
-              {cancelado ? (
-                <>
-                  <span style={{
-                    fontSize: 12, fontWeight: 700, color: "var(--danger)",
-                    textTransform: "uppercase", letterSpacing: ".04em",
-                  }}>
-                    Cancelado
-                  </span>
-                  <span style={{
-                    fontWeight: 700, fontVariantNumeric: "tabular-nums", minWidth: 90,
-                    textAlign: "right",
-                  }}>
-                    {peso(0)}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span style={{
-                    fontWeight: 700, fontVariantNumeric: "tabular-nums", minWidth: 90,
-                    textAlign: "right",
-                  }}>
-                    {peso(p.total)}
-                  </span>
-                  <button
-                    onClick={() => setConfirmando(p)}
-                    disabled={!sePuedeCancelar(p)}
-                    title={
-                      sePuedeCancelar(p)
-                        ? "Cancelar este ticket"
-                        : "Un pedido entregado ya no se puede cancelar"
-                    }
-                    style={{
-                      ...btnBorderStyle,
-                      height: 30, padding: "0 10px", fontSize: 12,
-                      color: sePuedeCancelar(p) ? "var(--danger)" : "var(--text-3)",
-                      borderColor: sePuedeCancelar(p) ? "var(--danger)" : "var(--border)",
-                      cursor: sePuedeCancelar(p) ? "pointer" : "not-allowed",
-                      opacity: sePuedeCancelar(p) ? 1 : 0.5,
-                    }}
-                  >
-                    Cancelar
-                  </button>
-                </>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {confirmando && (
-        <Confirmacion
-          titulo={`¿Cancelar el folio #${String(confirmando.folio).padStart(3, "0")}?`}
-          mensaje={`La venta de ${peso(confirmando.total)} pasará a $0.00 y dejará de contar en el corte.`}
-          textoConfirmar={cancelando ? "Cancelando..." : "Sí, cancelar ticket"}
-          deshabilitado={cancelando}
-          onConfirmar={() => void cancelar(confirmando)}
-          onCancelar={() => setConfirmando(null)}
-        />
-      )}
-    </div>
-  );
-}
-
+// Sub: Inicio de turno (apertura)
 // ---------------------------------------------------------------------------
-// Sección: Entradas y retiros
-
-function SeccionMovimientos({
-  estado, onCambio,
+function SubInicio({
+  estado, pendientes, onCambio, onIrACierre,
 }: {
   estado: EstadoCaja;
+  pendientes: AperturaLocal[];
   onCambio: () => void;
+  onIrACierre: (fecha: string) => void;
 }) {
-  const [movimientos, setMovimientos] = useState<MovimientoCaja[]>(estado.movimientos);
-  const [tipo, setTipo] = useState<TipoMovimientoCaja>(TipoMovimientoCaja.GASTO);
-  const [concepto, setConcepto] = useState("");
-  const [monto, setMonto] = useState("");
+  const [fondo, setFondo] = useState("");
+  const [notas, setNotas] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const totales = movimientos.reduce(
-    (acc, m) => {
-      if (m.tipo === "ENTRADA") acc.entradas += m.monto;
-      else acc.gastos += m.monto;
-      return acc;
-    },
-    { entradas: 0, gastos: 0 },
-  );
-
-  async function agregar() {
-    const m = parseFloat(monto);
-    if (!concepto.trim()) { setError("Escribe un concepto"); return; }
-    if (isNaN(m) || m <= 0) { setError("El monto debe ser mayor a 0"); return; }
-
-    setError(null);
-    setEnviando(true);
+  async function abrir() {
+    const n = parseFloat(fondo);
+    if (isNaN(n) || n < 0) { setError("Ingresa un fondo inicial válido (puede ser 0)."); return; }
+    setError(null); setEnviando(true);
     try {
-      const nuevo = await registrarMovimiento(crypto.randomUUID(), tipo, concepto.trim(), m);
+      await abrirDia(crypto.randomUUID(), n, notas.trim() || undefined);
+      // La apertura debe llegar al servidor ANTES que las ventas (BD): la cola la envía primero.
+      void sincronizarTodo();
+      onCambio();
+    } catch (err) {
+      setError(mensajeError(err, "No se pudo registrar la apertura."));
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  if (estado.cierre) {
+    return (
+      <div className="sub-scroll center">
+        <div className="panel">
+          <div className="panel-head">Turno cerrado</div>
+          <div className="note-box"><IcoCheck size={15} /> El corte del día ya se realizó. Para abrir un turno nuevo, espera la siguiente jornada.</div>
+        </div>
+      </div>
+    );
+  }
+
+  // RN-24: con un turno anterior sin cerrar no se abre uno nuevo. El servicio lo rechaza
+  // de todos modos; aquí se evita que el encargado capture el fondo para nada.
+  if (pendientes.length > 0) {
+    return (
+      <div className="sub-scroll center">
+        <AlertaTurnoSinCerrar pendientes={pendientes} onCerrar={onIrACierre} />
+      </div>
+    );
+  }
+
+  if (estado.apertura) {
+    return (
+      <div className="sub-scroll center">
+        <div className="panel">
+          <div className="panel-head">Turno en curso</div>
+          <div className="arq-row"><span>Hora de apertura</span><span>{hora(estado.apertura.abiertoEn)}</span></div>
+          <div className="arq-row"><span>Fondo inicial</span><span>{peso(estado.apertura.fondoInicial)}</span></div>
+          {estado.apertura.notas && <div className="arq-row"><span>Notas</span><span>{estado.apertura.notas}</span></div>}
+          <div className="note-box" style={{ marginTop: 14 }}>
+            Para cerrar el día ve a <strong>Cierre de turno</strong>.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="sub-scroll center">
+      <div className="panel">
+        <div className="panel-head">Abrir caja</div>
+        {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+        <label className="fld">
+          <span className="fld-lbl">Fondo inicial en caja</span>
+          <div className="fld-box">
+            <IcoBanknote size={17} />
+            <input inputMode="decimal" value={fondo} placeholder="0.00" autoFocus
+              onChange={(e) => setFondo(e.target.value.replace(/[^0-9.]/g, ""))} />
+          </div>
+        </label>
+        <label className="fld">
+          <span className="fld-lbl">Notas (opcional)</span>
+          <div className="fld-box">
+            <input value={notas} placeholder="Ej. fondo reducido por día festivo"
+              onChange={(e) => setNotas(e.target.value)} />
+          </div>
+        </label>
+        <button className="btn primary block" disabled={enviando || !fondo} onClick={() => void abrir()}>
+          <IcoPower size={17} /> {enviando ? "Abriendo…" : "Abrir turno"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub: Entradas y salidas (movimientos)
+// ---------------------------------------------------------------------------
+function SubMovimientos({ estado, onCambio }: { estado: EstadoCaja; onCambio: () => void }) {
+  const [movimientos, setMovimientos] = useState(estado.movimientos);
+  const [tipo, setTipo] = useState<TipoMovimientoCaja>(TipoMovimientoCaja.GASTO);
+  const [monto, setMonto] = useState("");
+  const [concepto, setConcepto] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [enviando, setEnviando] = useState(false);
+
+  const bloqueado = !estado.apertura || !!estado.cierre;
+  const movTotal = movimientos.reduce((s, m) => s + (m.tipo === "ENTRADA" ? m.monto : -m.monto), 0);
+
+  if (bloqueado) return <AvisoTurno>Abre el turno para registrar entradas y salidas.</AvisoTurno>;
+
+  async function registrar() {
+    const val = parseFloat(monto);
+    if (!concepto.trim()) { setError("Escribe un concepto."); return; }
+    if (isNaN(val) || val <= 0) { setError("El monto debe ser mayor a 0."); return; }
+    setError(null); setEnviando(true);
+    try {
+      const nuevo = await registrarMovimiento(crypto.randomUUID(), tipo, concepto.trim(), val);
       setMovimientos((prev) => [...prev, nuevo]);
-      setConcepto("");
-      setMonto("");
+      setMonto(""); setConcepto("");
       onCambio();
       void sincronizarTodo();
     } catch (err) {
@@ -515,7 +378,6 @@ function SeccionMovimientos({
   }
 
   async function quitar(id: string) {
-    setError(null);
     try {
       await eliminarMovimiento(id);
       setMovimientos((prev) => prev.filter((m) => m.id !== id));
@@ -527,579 +389,460 @@ function SeccionMovimientos({
   }
 
   return (
-    <div style={{ maxWidth: 560, margin: "0 auto" }}>
-      {error && <ErrorBanner mensaje={error} />}
-
-      {/* Selector de tipo */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        {([TipoMovimientoCaja.GASTO, TipoMovimientoCaja.ENTRADA] as const).map((t) => {
-          const activo = tipo === t;
-          const color = t === TipoMovimientoCaja.GASTO ? "var(--danger)" : "var(--ok)";
-          return (
-            <button
-              key={t}
-              onClick={() => setTipo(t)}
-              style={{
-                flex: 1, height: 44, borderRadius: 10, cursor: "pointer",
-                fontFamily: "var(--font)", fontSize: 14, fontWeight: 700,
-                border: `1px solid ${activo ? color : "var(--border)"}`,
-                background: activo ? `color-mix(in srgb, ${color} 12%, var(--surface))` : "transparent",
-                color: activo ? color : "var(--text-2)",
-              }}
-            >
-              {t === "GASTO" ? "Retiro / Gasto" : "Entrada"}
-            </button>
-          );
-        })}
-      </div>
-
-      <Field label="Concepto">
-        <input
-          type="text" value={concepto} autoFocus
-          onChange={(e) => setConcepto(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void agregar()}
-          placeholder={tipo === "GASTO" ? "Ej. Gas, servilletas" : "Ej. Fondo extra"}
-          style={inputStyle}
-        />
-      </Field>
-
-      <Field label="Monto ($)">
-        <input
-          type="number" min="0" step="0.01" value={monto}
-          onChange={(e) => setMonto(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void agregar()}
-          placeholder="0.00"
-          style={inputStyle}
-        />
-      </Field>
-
-      <button
-        onClick={() => void agregar()}
-        disabled={enviando}
-        style={{
-          ...btnPrimaryStyle,
-          marginTop: 4, marginBottom: 24,
-          background: tipo === "GASTO" ? "var(--danger)" : "var(--ok)",
-        }}
-      >
-        {enviando ? "Registrando..." : tipo === "GASTO" ? "Registrar retiro" : "Registrar entrada"}
-      </button>
-
-      <SectionTitle>Movimientos de hoy</SectionTitle>
-
-      {movimientos.length === 0 && (
-        <div style={{ color: "var(--text-3)", fontSize: 13 }}>Sin movimientos registrados.</div>
-      )}
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {movimientos.map((m) => {
-          const esGasto = m.tipo === "GASTO";
-          return (
-            <div key={m.id} style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "10px 14px", borderRadius: 8,
-              background: "var(--surface)", border: "1px solid var(--border)",
-            }}>
-              <span style={{
-                fontSize: 11, fontWeight: 700, textTransform: "uppercase",
-                letterSpacing: ".04em", minWidth: 62,
-                color: esGasto ? "var(--danger)" : "var(--ok)",
-              }}>
-                {esGasto ? "Retiro" : "Entrada"}
-              </span>
-              <span style={{ flex: 1, fontSize: 13 }}>{m.concepto}</span>
-              <span style={{ fontSize: 12, color: "var(--text-3)" }}>{hora(m.creadoEn)}</span>
-              <span style={{
-                fontWeight: 700, fontVariantNumeric: "tabular-nums", minWidth: 90,
-                textAlign: "right", color: esGasto ? "var(--danger)" : "var(--ok)",
-              }}>
-                {esGasto ? "-" : "+"}{peso(m.monto)}
-              </span>
-              <button onClick={() => void quitar(m.id)} style={btnIconSmall} title="Eliminar">✕</button>
-            </div>
-          );
-        })}
-      </div>
-
-      {movimientos.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <FilaResumen label="Total entradas" valor={`+${peso(totales.entradas)}`} color="var(--ok)" />
-          <FilaResumen label="Total retiros" valor={`-${peso(totales.gastos)}`} color="var(--danger)" />
+    <div className="sub-scroll two-col">
+      <div className="panel">
+        <div className="panel-head">Registrar movimiento</div>
+        {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+        <div className="fld">
+          <span className="fld-lbl">Tipo</span>
+          <div className="pick-row">
+            <button className={`pick-btn ${tipo === TipoMovimientoCaja.ENTRADA ? "active" : ""}`}
+              onClick={() => setTipo(TipoMovimientoCaja.ENTRADA)}>Entrada</button>
+            <button className={`pick-btn ${tipo === TipoMovimientoCaja.GASTO ? "active" : ""}`}
+              onClick={() => setTipo(TipoMovimientoCaja.GASTO)}>Salida</button>
+          </div>
         </div>
-      )}
+        <label className="fld">
+          <span className="fld-lbl">Monto</span>
+          <div className="fld-box">
+            <IcoBanknote size={17} />
+            <input inputMode="decimal" value={monto} placeholder="0.00"
+              onChange={(e) => setMonto(e.target.value.replace(/[^0-9.]/g, ""))} />
+          </div>
+        </label>
+        <label className="fld">
+          <span className="fld-lbl">Concepto</span>
+          <div className="fld-box">
+            <input value={concepto} placeholder={tipo === "GASTO" ? "Ej. pago proveedor tortillas" : "Ej. cambio adicional"}
+              onChange={(e) => setConcepto(e.target.value)} />
+          </div>
+        </label>
+        <button className="btn primary block" disabled={bloqueado || enviando || !monto || !concepto.trim()}
+          onClick={() => void registrar()}>
+          <IcoCheck size={17} /> Registrar {tipo === "GASTO" ? "salida" : "entrada"}
+        </button>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">Movimientos del turno</div>
+        {movimientos.length === 0 ? (
+          <div className="muted small">Sin movimientos registrados.</div>
+        ) : (
+          <table className="mini-table">
+            <tbody>
+              {movimientos.map((m) => (
+                <tr key={m.id}>
+                  <td className="mt-time">{hora(m.creadoEn)}</td>
+                  <td><span className={`mv-tag ${m.tipo === "GASTO" ? "out" : "in"}`}>{m.tipo === "GASTO" ? "Salida" : "Entrada"}</span></td>
+                  <td className="mt-desc">{m.concepto}</td>
+                  <td className={`mt-amt ${m.tipo === "GASTO" ? "neg" : "pos"}`}>{m.tipo === "GASTO" ? "−" : "+"}{peso(m.monto)}</td>
+                  <td style={{ width: 28 }}>
+                    <button className="btn sm ghost" style={{ height: 26, padding: "0 6px" }} title="Eliminar"
+                      onClick={() => void quitar(m.id)}><IcoTrash size={13} /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {movimientos.length > 0 && (
+          <div className="arq-row total"><span>Neto</span><span>{movTotal < 0 ? "−" : "+"}{peso(Math.abs(movTotal))}</span></div>
+        )}
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Sección: Cierre de día
-
-function SeccionCierre({
-  estado, sucursalNombre, onCerrado,
-}: {
-  estado: EstadoCaja;
-  sucursalNombre: string;
-  onCerrado: () => void;
-}) {
-  const [conteo, setConteo] = useState("");
-  const [notas, setNotas] = useState("");
-  const [confirmando, setConfirmando] = useState(false);
-  const [enviando, setEnviando] = useState(false);
+// Sub: Ventas del turno
+// ---------------------------------------------------------------------------
+function SubVentas({ estado }: { estado: EstadoCaja }) {
+  const [datos, setDatos] = useState<VentasDia | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    void (async () => {
+      try { setDatos(await getVentasDia()); } catch (err) { setError(mensajeError(err, "No se pudieron cargar las ventas.")); }
+    })();
+  }, []);
+
+  const ventas = estado.ventasDelDia;
+  if (!ventas) return <AvisoTurno>Abre el turno para ver las ventas.</AvisoTurno>;
+
+  const metodos = [
+    { id: "efectivo", nombre: "Efectivo", icon: <IcoBanknote size={18} />, monto: ventas.ventasEfectivo },
+    { id: "tarjeta", nombre: "Tarjeta", icon: <IcoCard size={18} />, monto: ventas.ventasTarjeta },
+    { id: "transfer", nombre: "Transferencia", icon: <IcoSwap size={18} />, monto: ventas.ventasTransfer },
+  ];
+  const total = ventas.totalVentas || 1;
+
+  return (
+    <div className="sub-scroll">
+      {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+      <div className="stat-row two">
+        <div className="stat-card lg">
+          <div className="stat-lbl">Ventas del turno</div>
+          <div className="stat-val">{peso(ventas.totalVentas)}</div>
+          <div className="stat-meta">{ventas.numPedidos} pedido{ventas.numPedidos === 1 ? "" : "s"} cobrado{ventas.numPedidos === 1 ? "" : "s"}</div>
+        </div>
+        <div className="panel" style={{ margin: 0 }}>
+          <div className="panel-head">Por método de pago</div>
+          {metodos.map((m) => {
+            const pct = Math.round((m.monto / total) * 100);
+            return (
+              <div className="pay-row" key={m.id}>
+                <div className="pay-ico">{m.icon}</div>
+                <div className="pay-main">
+                  <div className="pay-top"><span>{m.nombre}</span><strong>{peso(m.monto)}</strong></div>
+                  <div className="pay-bar"><span style={{ width: `${pct}%` }} /></div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 14 }}>
+        <div className="panel-head">Lista de ventas</div>
+        {!datos ? <div className="muted small">Cargando…</div> : datos.pedidos.length === 0 ? (
+          <div className="muted small">Aún no hay ventas hoy.</div>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr><th>Folio</th><th>Hora</th><th>Método</th><th>Estado</th><th className="ta-r">Total</th></tr>
+            </thead>
+            <tbody>
+              {datos.pedidos.map((p) => {
+                const cancelado = p.estado === "CANCELADO";
+                return (
+                  <tr key={p.id} style={cancelado ? { opacity: 0.55 } : undefined}>
+                    <td className="td-strong">#{String(p.folio).padStart(3, "0")}</td>
+                    <td className="mt-time">{hora(p.creadoEn)}</td>
+                    <td className="mt-desc">{p.metodoPago ? ETIQUETA_METODO[p.metodoPago] : "—"}</td>
+                    <td className="mt-desc">{cancelado ? "Cancelado" : "Cobrado"}</td>
+                    <td className="ta-r td-strong">{peso(cancelado ? 0 : p.total)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub: Cancelaciones (por folio) — reversa real de inventario/reembolso
+// ---------------------------------------------------------------------------
+function SubCancelaciones({ estado, onCambio }: { estado: EstadoCaja; onCambio: () => void }) {
+  const [pedidos, setPedidos] = useState<PedidoActivo[]>([]);
+  const [folio, setFolio] = useState("");
+  const [target, setTarget] = useState<PedidoActivo | { notFound: true; folio: number } | null>(null);
+  const [motivo, setMotivo] = useState<string | null>(null);
+  const [cancelando, setCancelando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const cancelables = pedidos.filter(
+    (p) => p.estado === EstadoPedido.PENDIENTE || p.estado === EstadoPedido.LISTO,
+  );
+
+  // La lista de cancelables se toma del SERVIDOR (estado real), no de la base local: un
+  // pedido ya entregado no debe aparecer como abierto aunque la copia local esté rezagada.
+  // Cancelar ya requiere conexión de todos modos (reversa de inventario/reembolso).
+  const recargar = async () => {
+    try { setPedidos(await cargarPedidosActivos()); } catch (err) { setError(mensajeError(err, "No se pudieron cargar los pedidos.")); }
+  };
+  useEffect(() => { void recargar(); }, []);
+
+  if (!estado.apertura || estado.cierre) {
+    return <AvisoTurno>Abre el turno para cancelar pedidos.</AvisoTurno>;
+  }
+
+  function buscar() {
+    const f = parseInt(folio, 10);
+    const found = cancelables.find((p) => p.folio === f);
+    setTarget(found ?? { notFound: true, folio: f });
+    setMotivo(null);
+  }
+
+  async function cancelar() {
+    if (!target || "notFound" in target || !motivo) return;
+    setCancelando(true); setError(null);
+    try {
+      // Cancelación real: el servidor revierte el inventario y registra reembolso si estaba
+      // cobrado. El motivo se elige pero aún no se persiste (falta campo en el backend).
+      await actualizarEstado(target.id, EstadoPedido.CANCELADO);
+      await recargar();
+      onCambio();
+      setTarget(null); setMotivo(null); setFolio("");
+    } catch (err) {
+      setError(mensajeError(err, `No se pudo cancelar el folio #${String(target.folio).padStart(3, "0")}.`));
+    } finally {
+      setCancelando(false);
+    }
+  }
+
+  return (
+    <div className="sub-scroll two-col">
+      <div className="panel">
+        <div className="panel-head">Buscar por folio</div>
+        {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+        <div className="folio-row">
+          <div className="fld-box">
+            <IcoReceipt size={17} />
+            <input inputMode="numeric" value={folio} placeholder="Número de folio"
+              onChange={(e) => setFolio(e.target.value.replace(/[^0-9]/g, ""))} />
+          </div>
+          <button className="btn" disabled={!folio} onClick={buscar}>Buscar</button>
+        </div>
+
+        {target && "notFound" in target && (
+          <div className="note-box warn" style={{ marginTop: 12 }}>
+            No hay pedido cancelable con folio #{String(target.folio).padStart(3, "0")}.
+          </div>
+        )}
+
+        {target && !("notFound" in target) && (
+          <div className="cancel-target">
+            <div className="ct-top">
+              <span className="kb-folio">#{String(target.folio).padStart(3, "0")}</span>
+              <span className="pill am">{target.estado === "LISTO" ? "Listo" : "En preparación"}</span>
+            </div>
+            <div className="ct-meta">{hora(target.creadoEn)} · <strong>{peso(target.total)}</strong></div>
+            <div className="fld-lbl" style={{ marginTop: 14 }}>Motivo de cancelación</div>
+            <div className="pick-row wrap">
+              {MOTIVOS.map((m) => (
+                <button key={m} className={`pick-btn ${motivo === m ? "active" : ""}`} onClick={() => setMotivo(m)}>{m}</button>
+              ))}
+            </div>
+            <button className="btn danger block" style={{ marginTop: 14 }} disabled={!motivo || cancelando}
+              onClick={() => void cancelar()}>
+              <IcoClose size={17} /> {cancelando ? "Cancelando…" : `Cancelar pedido #${String(target.folio).padStart(3, "0")}`}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">Pedidos abiertos</div>
+        <div className="open-list">
+          {cancelables.length === 0 ? (
+            <div className="kb-empty">Sin pedidos abiertos</div>
+          ) : cancelables.map((p) => (
+            <div className={`open-row ${target && !("notFound" in target) && target.folio === p.folio ? "sel" : ""}`} key={p.id}>
+              <div>
+                <div className="kb-folio">#{String(p.folio).padStart(3, "0")}</div>
+                <div className="muted small">{hora(p.creadoEn)} · {p.estado === "LISTO" ? "Listo" : "En preparación"}</div>
+              </div>
+              <div className="open-end">
+                <span className="kb-total">{peso(p.total)}</span>
+                <button className="link-danger" onClick={() => { setTarget(p); setMotivo(null); setFolio(String(p.folio)); }}>Cancelar</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Panel con el desglose de un corte. Lo comparten la pantalla de corte y la de cierre:
+// es literalmente el mismo cálculo (RN-23), así que también debe ser la misma tabla.
+// ---------------------------------------------------------------------------
+function DesgloseCorte({ estado }: { estado: EstadoCaja }) {
   const ventas = estado.ventasDelDia;
   const apertura = estado.apertura;
   if (!ventas || !apertura) return null;
 
   const { entradas, gastos } = estado.totalesMovimientos;
-  const esperado = estado.esperadoEnCaja ?? 0;
-  const enTerminal = ventas.ventasTarjeta + ventas.ventasTransfer;
 
-  const conteoNum = parseFloat(conteo);
-  const diferencia = isNaN(conteoNum) ? null : conteoNum - esperado;
+  return (
+    <>
+      <div className="panel">
+        <div className="panel-head">Resumen del turno</div>
+        <div className="arq-row"><span>Apertura</span><span>{hora(apertura.abiertoEn)}</span></div>
+        <div className="arq-row"><span>Pedidos cobrados</span><span>{ventas.numPedidos}</span></div>
+        <div className="arq-row"><span>Efectivo</span><span>{peso(ventas.ventasEfectivo)}</span></div>
+        <div className="arq-row"><span>Tarjeta</span><span>{peso(ventas.ventasTarjeta)}</span></div>
+        <div className="arq-row"><span>Transferencia</span><span>{peso(ventas.ventasTransfer)}</span></div>
+        <div className="arq-row total"><span>Ventas totales</span><span>{peso(ventas.totalVentas)}</span></div>
+      </div>
 
-  async function cerrar() {
-    if (isNaN(conteoNum) || conteoNum < 0) {
-      setError("Ingresa el conteo físico de caja");
-      setConfirmando(false);
-      return;
-    }
-    setError(null);
-    setEnviando(true);
+      <div className="panel">
+        <div className="panel-head">Efectivo esperado</div>
+        <div className="arq-row"><span>Fondo inicial</span><span>{peso(apertura.fondoInicial)}</span></div>
+        <div className="arq-row"><span>+ Ventas en efectivo</span><span>{peso(ventas.ventasEfectivo)}</span></div>
+        {entradas > 0 && <div className="arq-row"><span>+ Entradas</span><span>{peso(entradas)}</span></div>}
+        {gastos > 0 && <div className="arq-row"><span>− Salidas</span><span>−{peso(gastos)}</span></div>}
+        <div className="arq-row total">
+          <span>Efectivo esperado</span><span>{peso(estado.esperadoEnCaja ?? 0)}</span>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub: Generar corte (RN-23)
+//
+// Solo lectura. No cierra el turno ni escribe nada: es el conteo de control que el
+// personal hace a media jornada. Se puede repetir cuantas veces haga falta.
+// ---------------------------------------------------------------------------
+function SubCorte({ fecha, sucursalNombre }: { fecha: string; sucursalNombre: string }) {
+  const [estado, setEstado] = useState<EstadoCaja | null>(null);
+  const [imprimiendo, setImprimiendo] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [listo, setListo] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setEstado(await getEstadoCaja(fecha));
+      } catch (err) {
+        setError(mensajeError(err, "No se pudo cargar el corte."));
+      }
+    })();
+  }, [fecha]);
+
+  async function imprimir() {
+    setError(null); setListo(false); setImprimiendo(true);
     try {
-      // El cierre se calcula y se guarda en LOCAL: el corte se puede hacer e imprimir sin
-      // conexión. La cola lo envía después, y solo cuando todos los pedidos del día ya
-      // hayan sincronizado — un cierre enviado antes produciría un corte sin esas ventas.
-      const cierre = await cerrarDia(
-        crypto.randomUUID(),
-        conteoNum,
-        notas.trim() || undefined,
-      );
-
-      void sincronizarTodo();
-
-      // El corte se imprime con la lista de pedidos del día tal como quedó al cerrar.
-      const ventasDia = await getVentasDia();
-      const datos: DatosCierreImpresion = {
-        sucursal: sucursalNombre,
-        fecha: estado.fecha,
-        cerradoEn: cierre.cerradoEn,
-        fondoInicial: cierre.fondoInicial,
-        ventasEfectivo: cierre.ventasEfectivo,
-        ventasTarjeta: cierre.ventasTarjeta,
-        ventasTransfer: cierre.ventasTransfer,
-        totalVentas: cierre.totalVentas,
-        numPedidos: ventasDia.resumen.numPedidos,
-        pedidos: ventasDia.pedidos.map((p) => ({
-          folio: p.folio,
-          total: p.total,
-          metodoPago: p.metodoPago,
-          cancelado: p.estado === "CANCELADO",
-        })),
-        entradas: cierre.entradas.map((e) => ({ concepto: e.concepto, monto: e.monto })),
-        gastos: cierre.gastos.map((g) => ({ concepto: g.concepto, monto: g.monto })),
-        reembolsosEfectivo: cierre.reembolsosEfectivo,
-        esperadoEnCaja: cierre.esperadoEnCaja,
-        conteoFisico: cierre.conteoFisico,
-        diferencia: cierre.diferencia,
-        ...(cierre.notas !== null && { notas: cierre.notas }),
-      };
-      await dispararImpresionCierre(datos);
-
-      onCerrado();
+      await imprimirCorte(sucursalNombre, fecha);
+      setListo(true);
     } catch (err) {
-      setError(mensajeError(err, "No se pudo registrar el cierre."));
-      setConfirmando(false);
+      setError(mensajeError(err, "No se pudo imprimir el corte."));
     } finally {
-      setEnviando(false);
+      setImprimiendo(false);
     }
   }
 
+  if (!estado) {
+    return <div className="sub-scroll"><div className="muted small">Cargando…</div></div>;
+  }
+  if (!estado.apertura) {
+    return <AvisoTurno>Ese día no tuvo apertura de caja: no hay corte que generar.</AvisoTurno>;
+  }
+
+  const cerrado = !!estado.cierre;
+
   return (
-    <div style={{
-      display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32,
-      maxWidth: 900, margin: "0 auto",
-    }}>
-      {/* Izquierda: totales calculados */}
-      <div>
-        <SectionTitle>Ventas del día</SectionTitle>
-        <FilaResumen label="Pedidos" valor={String(ventas.numPedidos)} mono={false} />
-        <div style={{ height: 1, background: "var(--border)", margin: "10px 0" }} />
-        <FilaResumen label="Efectivo" valor={peso(ventas.ventasEfectivo)} />
-        <FilaResumen label="Tarjeta" valor={peso(ventas.ventasTarjeta)} />
-        <FilaResumen label="Transferencia" valor={peso(ventas.ventasTransfer)} />
-        <div style={{ height: 1, background: "var(--border)", margin: "10px 0" }} />
-        <FilaResumen label="Total ventas" valor={peso(ventas.totalVentas)} bold />
+    <div className="sub-scroll two-col">
+      <DesgloseCorte estado={estado} />
 
-        <div style={{ height: 24 }} />
-        <SectionTitle>Dinero esperado</SectionTitle>
-        <FilaResumen label="Fondo inicial" valor={peso(apertura.fondoInicial)} />
-        <FilaResumen label="+ Ventas efectivo" valor={peso(ventas.ventasEfectivo)} />
-        {entradas > 0 && (
-          <FilaResumen label="+ Entradas" valor={`+${peso(entradas)}`} color="var(--ok)" />
-        )}
-        {gastos > 0 && (
-          <FilaResumen label="− Gastos / retiros" valor={`-${peso(gastos)}`} color="var(--danger)" />
-        )}
-        <div style={{ height: 1, background: "var(--border)", margin: "10px 0" }} />
-        <FilaResumen label="Esperado en caja" valor={peso(esperado)} bold />
-        <FilaResumen label="Esperado en terminal" valor={peso(enTerminal)} bold />
-      </div>
-
-      {/* Derecha: conteo y confirmación */}
-      <div>
-        {error && <ErrorBanner mensaje={error} />}
-
-        <SectionTitle>Conteo físico de caja</SectionTitle>
-        <input
-          type="number" min="0" step="0.01" value={conteo} autoFocus
-          onChange={(e) => setConteo(e.target.value)}
-          placeholder="0.00"
-          style={{ ...inputStyle, marginBottom: 8 }}
-        />
-
-        {diferencia !== null && (
-          <div style={{
-            padding: "10px 14px", borderRadius: 8, marginBottom: 16,
-            background: diferencia === 0
-              ? "color-mix(in srgb, var(--ok) 10%, var(--surface))"
-              : Math.abs(diferencia) < 10
-                ? "color-mix(in srgb, var(--warn) 10%, var(--surface))"
-                : "color-mix(in srgb, var(--danger) 10%, var(--surface))",
-            border: `1px solid ${diferencia === 0 ? "var(--ok)" : Math.abs(diferencia) < 10 ? "var(--warn)" : "var(--danger)"}`,
-            fontSize: 14, fontWeight: 700,
-            color: diferencia === 0 ? "var(--ok)" : Math.abs(diferencia) < 10 ? "var(--warn)" : "var(--danger)",
-          }}>
-            {diferencia === 0
-              ? "✓ Caja cuadra exacto"
-              : diferencia > 0
-                ? `Sobran ${peso(diferencia)}`
-                : `Faltan ${peso(Math.abs(diferencia))}`}
+      <div className="panel">
+        <div className="panel-head">Imprimir</div>
+        {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+        <div className="arq-row">
+          <span>Tipo de corte</span>
+          <span>{cerrado ? "Final" : "Parcial"}</span>
+        </div>
+        <button className="btn primary block" style={{ marginTop: 14 }} disabled={imprimiendo}
+          onClick={() => void imprimir()}>
+          <IcoPrint size={17} /> {imprimiendo ? "Imprimiendo…" : "Imprimir corte"}
+        </button>
+        {listo && (
+          <div className="note-box" style={{ marginTop: 12 }}>
+            <IcoCheck size={15} /> Corte enviado.
           </div>
         )}
-
-        <Field label="Notas (opcional)">
-          <textarea
-            value={notas} onChange={(e) => setNotas(e.target.value)}
-            rows={2} placeholder="Observaciones del cierre..."
-            style={{ ...inputStyle, height: "auto", resize: "none", padding: "8px 12px" }}
-          />
-        </Field>
-
-        <button
-          onClick={() => setConfirmando(true)}
-          disabled={enviando || isNaN(conteoNum)}
-          style={{
-            ...btnPrimaryStyle, marginTop: 16, background: "var(--danger)",
-            opacity: isNaN(conteoNum) ? 0.5 : 1,
-            cursor: isNaN(conteoNum) ? "not-allowed" : "pointer",
-          }}
-        >
-          {enviando ? "Cerrando..." : "Cerrar día e imprimir corte"}
-        </button>
       </div>
-
-      {confirmando && (
-        <Confirmacion
-          titulo="¿Cerrar el día?"
-          mensaje="Se totalizan las ventas, se cierra la caja y se imprime el corte. Esta acción no se puede deshacer."
-          textoConfirmar={enviando ? "Cerrando..." : "Sí, cerrar día"}
-          deshabilitado={enviando}
-          onConfirmar={() => void cerrar()}
-          onCancelar={() => setConfirmando(false)}
-        />
-      )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Pantalla: Apertura
-
-function PantallaApertura({ onAbierto }: { onAbierto: () => void }) {
-  const [fondo, setFondo] = useState("");
+// Sub: Cierre de turno
+//
+// Escribe una sola vez: sella los movimientos del día y congela el snapshot. Recibe la
+// fecha porque también sirve para cerrar un turno anterior que quedó abierto (RN-24).
+// ---------------------------------------------------------------------------
+function SubCierre({
+  fecha, sucursalNombre, onCerrado,
+}: { fecha: string; sucursalNombre: string; onCerrado: () => void }) {
+  const [estado, setEstado] = useState<EstadoCaja | null>(null);
   const [notas, setNotas] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function abrir() {
-    const n = parseFloat(fondo);
-    if (isNaN(n) || n < 0) { setError("Ingresa un fondo inicial válido (puede ser 0)"); return; }
-    setError(null);
-    setEnviando(true);
+  useEffect(() => {
+    void (async () => {
+      try {
+        setEstado(await getEstadoCaja(fecha));
+      } catch (err) {
+        setError(mensajeError(err, "No se pudo cargar el estado de caja."));
+      }
+    })();
+  }, [fecha]);
+
+  async function cerrar() {
+    setError(null); setEnviando(true);
     try {
-      await abrirDia(crypto.randomUUID(), n, notas.trim() || undefined);
-      onAbierto();
-      // La apertura debe llegar al servidor ANTES que las ventas del día: sin ella, el
-      // backend rechaza los pedidos con DIA_NO_ABIERTO. La cola la envía primero.
+      await cerrarDia(crypto.randomUUID(), fecha, notas.trim() || undefined);
       void sincronizarTodo();
+
+      // El ticket se arma DESPUÉS de cerrar y desde la base: así imprime el snapshot ya
+      // sellado, no los números en memoria de esta pantalla.
+      await dispararImpresionCierre(await armarCorte(sucursalNombre, fecha));
+      onCerrado();
     } catch (err) {
-      setError(mensajeError(err, "No se pudo registrar la apertura."));
+      setError(mensajeError(err, "No se pudo registrar el cierre."));
     } finally {
       setEnviando(false);
     }
   }
 
-  return (
-    <div style={{ maxWidth: 400, margin: "0 auto" }}>
-      <h2 style={{ margin: "0 0 24px", fontSize: 18, fontWeight: 700 }}>Apertura del día</h2>
+  if (!estado) {
+    return <div className="sub-scroll"><div className="muted small">Cargando…</div></div>;
+  }
 
-      {error && <ErrorBanner mensaje={error} />}
+  // Día ya cerrado: mostrar el corte tal como quedó.
+  if (estado.cierre) {
+    const c = estado.cierre;
+    return (
+      <div className="sub-scroll two-col">
+        <div className="panel">
+          <div className="panel-head">Ventas del corte</div>
+          <div className="arq-row"><span>Efectivo</span><span>{peso(c.ventasEfectivo)}</span></div>
+          <div className="arq-row"><span>Tarjeta</span><span>{peso(c.ventasTarjeta)}</span></div>
+          <div className="arq-row"><span>Transferencia</span><span>{peso(c.ventasTransfer)}</span></div>
+          <div className="arq-row total"><span>Total ventas</span><span>{peso(c.totalVentas)}</span></div>
+        </div>
+        <div className="panel">
+          <div className="panel-head">Efectivo esperado · {fechaLegible(c.cerradoEn)}</div>
+          <div className="arq-row"><span>Fondo inicial</span><span>{peso(c.fondoInicial)}</span></div>
+          <div className="arq-row total"><span>Esperado en caja</span><span>{peso(c.esperadoEnCaja)}</span></div>
+        </div>
+      </div>
+    );
+  }
 
-      <Field label="Fondo inicial ($)">
-        <input
-          type="number" min="0" step="0.01" value={fondo} autoFocus
-          onChange={(e) => setFondo(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void abrir()}
-          placeholder="0.00"
-          style={inputStyle}
-        />
-      </Field>
-
-      <Field label="Notas (opcional)">
-        <input
-          type="text" value={notas}
-          onChange={(e) => setNotas(e.target.value)}
-          placeholder="Ej. Fondo reducido por día festivo"
-          style={inputStyle}
-        />
-      </Field>
-
-      <button onClick={() => void abrir()} disabled={enviando} style={{ ...btnPrimaryStyle, marginTop: 8 }}>
-        {enviando ? "Registrando..." : "Abrir día"}
-      </button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Pantalla: Resumen post-cierre
-
-function PantallaResumen({
-  estado, cierre, sucursalNombre,
-}: {
-  estado: EstadoCaja;
-  cierre: CierreInfo;
-  sucursalNombre: string;
-}) {
-  const [copiado, setCopiado] = useState(false);
-  const enTerminal = cierre.ventasTarjeta + cierre.ventasTransfer;
-
-  function copiar() {
-    void navigator.clipboard.writeText(generarReporte(estado, cierre, sucursalNombre)).then(() => {
-      setCopiado(true);
-      setTimeout(() => setCopiado(false), 2000);
-    });
+  if (!estado.apertura || !estado.ventasDelDia) {
+    return <AvisoTurno>Abre el turno antes de poder cerrarlo.</AvisoTurno>;
   }
 
   return (
-    <div style={{ maxWidth: 560, margin: "0 auto" }}>
-      <div style={{
-        padding: "16px 20px", borderRadius: 10, marginBottom: 24,
-        background: "color-mix(in srgb, var(--ok) 10%, var(--surface))",
-        border: "1px solid var(--ok)", display: "flex", alignItems: "center", gap: 10,
-      }}>
-        <span style={{ fontSize: 20 }}>✓</span>
-        <div>
-          <div style={{ fontWeight: 700, color: "var(--ok)" }}>Día cerrado</div>
-          <div style={{ fontSize: 12, color: "var(--text-3)" }}>{fechaLegible(cierre.cerradoEn)}</div>
-        </div>
-        <button onClick={copiar} style={{ ...btnBorderStyle, marginLeft: "auto" }}>
-          {copiado ? "✓ Copiado" : "Copiar resumen"}
+    <div className="sub-scroll two-col">
+      <DesgloseCorte estado={estado} />
+
+      <div className="panel">
+        <div className="panel-head">Cerrar el turno</div>
+        {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+
+        <label className="fld">
+          <span className="fld-lbl">Notas (opcional)</span>
+          <div className="fld-box">
+            <input value={notas} placeholder="Observaciones del cierre"
+              onChange={(e) => setNotas(e.target.value)} />
+          </div>
+        </label>
+
+        <button className="btn primary block" style={{ marginTop: 14 }} disabled={enviando}
+          onClick={() => void cerrar()}>
+          <IcoLock size={17} /> {enviando ? "Cerrando…" : "Cerrar turno e imprimir corte"}
         </button>
       </div>
-
-      <SectionTitle>Ventas</SectionTitle>
-      <FilaResumen label="Efectivo" valor={peso(cierre.ventasEfectivo)} />
-      <FilaResumen label="Tarjeta" valor={peso(cierre.ventasTarjeta)} />
-      <FilaResumen label="Transferencia" valor={peso(cierre.ventasTransfer)} />
-      <FilaResumen label="Total ventas" valor={peso(cierre.totalVentas)} bold />
-
-      <div style={{ height: 20 }} />
-      <SectionTitle>Conciliación</SectionTitle>
-      <FilaResumen label="Fondo inicial" valor={peso(cierre.fondoInicial)} />
-      {cierre.totalEntradas > 0 && (
-        <FilaResumen label="+ Entradas" valor={`+${peso(cierre.totalEntradas)}`} color="var(--ok)" />
-      )}
-      {cierre.totalGastos > 0 && (
-        <FilaResumen label="− Gastos / retiros" valor={`-${peso(cierre.totalGastos)}`} color="var(--danger)" />
-      )}
-      <FilaResumen label="Esperado en caja" valor={peso(cierre.esperadoEnCaja)} bold />
-      <FilaResumen label="Esperado en terminal" valor={peso(enTerminal)} />
-      <FilaResumen label="Conteo físico" valor={peso(cierre.conteoFisico)} />
-      <FilaResumen
-        label="Diferencia"
-        valor={`${cierre.diferencia >= 0 ? "+" : ""}${peso(cierre.diferencia)}`}
-        bold
-        color={cierre.diferencia === 0 ? "var(--ok)" : Math.abs(cierre.diferencia) < 10 ? "var(--warn)" : "var(--danger)"}
-      />
-
-      {cierre.gastos.length > 0 && (
-        <>
-          <div style={{ height: 20 }} />
-          <SectionTitle>Gastos / retiros</SectionTitle>
-          {cierre.gastos.map((g) => (
-            <FilaResumen key={g.id} label={g.concepto} valor={peso(g.monto)} color="var(--danger)" />
-          ))}
-        </>
-      )}
-
-      {cierre.entradas.length > 0 && (
-        <>
-          <div style={{ height: 20 }} />
-          <SectionTitle>Entradas</SectionTitle>
-          {cierre.entradas.map((e) => (
-            <FilaResumen key={e.id} label={e.concepto} valor={peso(e.monto)} color="var(--ok)" />
-          ))}
-        </>
-      )}
-
-      {cierre.notas && (
-        <div style={{ marginTop: 16, fontSize: 13, color: "var(--text-3)", fontStyle: "italic" }}>
-          {cierre.notas}
-        </div>
-      )}
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Subcomponentes auxiliares
-
-function Confirmacion({
-  titulo, mensaje, textoConfirmar, deshabilitado, onConfirmar, onCancelar,
-}: {
-  titulo: string;
-  mensaje: string;
-  textoConfirmar: string;
-  deshabilitado: boolean;
-  onConfirmar: () => void;
-  onCancelar: () => void;
-}) {
-  return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 40,
-      background: "rgba(0,0,0,.55)",
-      display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
-    }}>
-      <div style={{
-        width: "100%", maxWidth: 420, borderRadius: 14, padding: 24,
-        background: "var(--surface)", border: "1px solid var(--border)",
-      }}>
-        <h3 style={{ margin: "0 0 10px", fontSize: 17, fontWeight: 700 }}>{titulo}</h3>
-        <p style={{ margin: "0 0 20px", fontSize: 13, color: "var(--text-2)", lineHeight: 1.5 }}>
-          {mensaje}
-        </p>
-        <div style={{ display: "flex", gap: 10 }}>
-          <button
-            onClick={onCancelar}
-            disabled={deshabilitado}
-            style={{ ...btnBorderStyle, flex: 1, height: 42 }}
-          >
-            Volver
-          </button>
-          <button
-            onClick={onConfirmar}
-            disabled={deshabilitado}
-            style={{ ...btnPrimaryStyle, flex: 1, background: "var(--danger)" }}
-          >
-            {textoConfirmar}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{
-      fontSize: 11, fontWeight: 700, letterSpacing: ".06em",
-      textTransform: "uppercase", color: "var(--text-3)", marginBottom: 10,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function FilaResumen({
-  label, valor, bold = false, color, mono = true,
-}: {
-  label: string;
-  valor: string;
-  bold?: boolean;
-  color?: string;
-  mono?: boolean;
-}) {
-  return (
-    <div style={{
-      display: "flex", justifyContent: "space-between", alignItems: "baseline",
-      padding: "4px 0", fontSize: bold ? 15 : 13,
-      fontWeight: bold ? 700 : 400,
-    }}>
-      <span style={{ color: color ?? "var(--text-2)" }}>{label}</span>
-      <span style={{
-        color: color ?? "var(--text)",
-        fontVariantNumeric: mono ? "tabular-nums" : "normal",
-      }}>
-        {valor}
-      </span>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{
-        fontSize: 11, fontWeight: 700, letterSpacing: ".06em",
-        textTransform: "uppercase", color: "var(--text-3)", marginBottom: 6,
-      }}>
-        {label}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function ErrorBanner({ mensaje }: { mensaje: string }) {
-  return (
-    <div style={{
-      padding: "10px 14px", borderRadius: 8, marginBottom: 16,
-      background: "color-mix(in srgb, var(--danger) 10%, var(--surface))",
-      border: "1px solid color-mix(in srgb, var(--danger) 30%, var(--border))",
-      fontSize: 13, color: "var(--danger)",
-    }}>
-      {mensaje}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Estilos
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", height: 40, borderRadius: 8,
-  border: "1px solid var(--border)", background: "var(--bg)",
-  padding: "0 12px", fontSize: 14, color: "var(--text)",
-  fontFamily: "var(--font)", boxSizing: "border-box", outline: "none",
-};
-
-const btnPrimaryStyle: React.CSSProperties = {
-  width: "100%", height: 44, borderRadius: 10, border: "none",
-  background: "var(--accent)", color: "#fff",
-  fontFamily: "var(--font)", fontSize: 14, fontWeight: 700, cursor: "pointer",
-};
-
-const btnBorderStyle: React.CSSProperties = {
-  height: 34, borderRadius: 8, border: "1px solid var(--border)",
-  background: "transparent", color: "var(--text-2)",
-  fontFamily: "var(--font)", fontSize: 13, fontWeight: 600,
-  cursor: "pointer", padding: "0 14px",
-};
-
-const btnIconSmall: React.CSSProperties = {
-  width: 22, height: 22, borderRadius: 4, border: "none",
-  background: "transparent", color: "var(--text-3)",
-  cursor: "pointer", fontSize: 12, flexShrink: 0,
-};

@@ -1,6 +1,7 @@
 import initSqlJs, { type Database } from "sql.js";
 // ?url resuelto por Vite en browser; en Node (tests) sql.js halla el WASM solo.
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
+import type { EstadoPedido } from "@brasas/shared";
 import type { LocalDB } from "../LocalDB.js";
 import type {
   CategoriaLocal,
@@ -318,6 +319,20 @@ export class SQLiteLocalDB implements LocalDB {
     return res[0].values.map(([data]) => JSON.parse(data as string) as PedidoLocal);
   }
 
+  // El estado vive dentro del blob JSON. Se reescribe el blob (no las columnas indexadas:
+  // id/folio/fecha no cambian al avanzar el estado). No-op si el pedido no está en local.
+  async actualizarEstadoPedido(id: string, estado: EstadoPedido): Promise<void> {
+    const res = this.db.exec("SELECT data FROM pedidos WHERE id = ?", [id]);
+    if (!res[0]?.values[0]) return;
+
+    const pedido = JSON.parse(res[0].values[0][0] as string) as PedidoLocal;
+    pedido.estado = estado;
+    pedido.actualizadoEn = new Date().toISOString();
+
+    this.db.run("UPDATE pedidos SET data = ? WHERE id = ?", [JSON.stringify(pedido), id]);
+    await this.persistir();
+  }
+
   // ---- Caja (BD-19) ---------------------------------------------------------
 
   private leerUno<T>(sql: string, params: (string | number)[]): T | null {
@@ -356,6 +371,18 @@ export class SQLiteLocalDB implements LocalDB {
   async getAperturasPendientesSync(): Promise<AperturaLocal[]> {
     return this.leerVarios<AperturaLocal>(
       "SELECT data FROM caja_apertura WHERE sincronizado = 0 ORDER BY fecha_operativa ASC",
+    );
+  }
+
+  // RN-24. La comparación de fechas es lexicográfica porque "YYYY-MM-DD" lo permite: es
+  // el mismo orden que el cronológico. Nada de convertir a Date aquí.
+  async getDiasSinCerrar(anteriorA: string): Promise<AperturaLocal[]> {
+    return this.leerVarios<AperturaLocal>(
+      `SELECT a.data FROM caja_apertura a
+       LEFT JOIN caja_cierre c ON c.fecha_operativa = a.fecha_operativa
+       WHERE a.fecha_operativa < ? AND c.id IS NULL
+       ORDER BY a.fecha_operativa ASC`,
+      [anteriorA],
     );
   }
 

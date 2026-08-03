@@ -1,4 +1,5 @@
 import { apiFetch } from "../lib/api.js";
+import { getLocalDB } from "../db/db.js";
 import { diaOperativo } from "./diaOperativo.js";
 import type { EstadoPedido, OrigenPedido } from "@brasas/shared";
 
@@ -32,4 +33,10 @@ export async function actualizarEstado(
     method: "PATCH",
     body: JSON.stringify({ estado: nuevoEstado }),
   });
+
+  // El tablero de Pedidos lee del servidor, pero la caja lee de la base LOCAL. Si el estado
+  // no se replica localmente, un pedido entregado sigue apareciendo cancelable en Caja y uno
+  // cancelado sigue contando en las ventas del turno. Se replica tras confirmar en servidor.
+  const db = await getLocalDB();
+  await db.actualizarEstadoPedido(pedidoId, nuevoEstado);
 }

@@ -13,3 +13,16 @@ const ZONA = "America/Mazatlan";
 export function diaOperativo(momento: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: ZONA }).format(momento);
 }
+
+const MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+
+// Muestra una fecha operativa ("2026-06-14" → "14 jun") SIN pasar por Date.
+//
+// `new Date("2026-06-14")` se interpreta como medianoche UTC; al formatearla en hora de
+// Mazatlán (UTC-7) retrocede al día 13. Una fecha operativa ya viene en hora del negocio:
+// convertirla otra vez la corrompe. Se formatea a partir de sus propias partes.
+export function fechaOperativaCorta(fecha: string): string {
+  const [, mes, dia] = fecha.split("-");
+  if (!mes || !dia) return fecha;
+  return `${Number(dia)} ${MESES[Number(mes) - 1] ?? ""}`.trim();
+}

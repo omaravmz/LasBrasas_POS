@@ -25,7 +25,6 @@ export function ConfiguradorDisponibilidad({ cortes, gruposCorte, overrides, onT
         <div className="modal-head">
           <div>
             <h2>Disponibilidad de cortes</h2>
-            <div className="sub">Aplica a todos los paquetes de carne</div>
           </div>
           <button className="close" onClick={onCerrar}><IcoClose size={18} /></button>
         </div>
@@ -46,7 +45,7 @@ export function ConfiguradorDisponibilidad({ cortes, gruposCorte, overrides, onT
                       onClick={() => onToggle(nombre)}
                     >
                       <span className="nm">{nombre}</span>
-                      <span className="frac">{disponible ? "✓" : "✗"}</span>
+                      {!disponible && <span className="cut-badge agotado">Agotado</span>}
                     </button>
                   );
                 })}

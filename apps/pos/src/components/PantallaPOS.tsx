@@ -9,13 +9,15 @@ import { ConfiguradorPollo } from "./ConfiguradorPollo.js";
 import { ConfiguradorRapido } from "./ConfiguradorRapido.js";
 import { EditarNota } from "./EditarNota.js";
 import { VistaPreviewTicket } from "./VistaPreviewTicket.js";
-import { IcoBag, IcoMinus, IcoPlus, IcoTrash, IcoPencil, IcoPrint, IcoOnline, IcoOffline } from "./Iconos.js";
+import { IcoBag, IcoMinus, IcoPlus, IcoTrash, IcoPencil, IcoPrint, IcoOnline, IcoOffline, IcoStore, IcoGrid, IcoReceipt, IcoWallet, IcoBox, IcoSun, IcoMoon, IcoPower, IcoLock, IcoBanknote } from "./Iconos.js";
+import { TypeMenu, PackageView } from "./MenuMosaico.js";
 import { type BorradorPedido, type ItemBorrador, type CorteBorrador } from "../types/pedido.js";
 import { OrigenPedido, EstadoPedido, type MetodoPago } from "@brasas/shared";
 import { peekFolio } from "../services/folio.js";
-import { diaOperativo } from "../services/diaOperativo.js";
+import { diaOperativo, fechaOperativaCorta } from "../services/diaOperativo.js";
 import { getCatalogoVersion } from "../sync/catalogSync.js";
 import { guardarPedido } from "../services/pedidoService.js";
+import { abrirDia, getEstadoCaja, getDiasSinCerrar } from "../services/cajaService.js";
 import { sincronizarTodo } from "../sync/colaSync.js";
 import { buildDatosImpresion, dispararImpresion } from "../services/print.js";
 import { useOnlineStatus } from "../hooks/useOnlineStatus.js";
@@ -33,9 +35,12 @@ type ModalState =
   | { tipo: "pollo"; producto: ProductoLocal }
   | { tipo: "nota"; item: ItemBorrador }
   | { tipo: "ticket" }
-  | { tipo: "caja" }
   | { tipo: "disponibilidad" }
   | null;
+
+// Pantalla activa del nav rail. Pedidos y Caja son pantallas propias (no modales): la
+// lógica ya vive en VistaPedidos / VistaCaja y se conserva tal cual.
+type Vista = "vender" | "pedidos" | "caja";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -98,7 +103,16 @@ export function PantallaPOS() {
   const [folio, setFolio] = useState(1);
   const [sucursalId, setSucursalId] = useState("");
   const [sucursalNombre, setSucursalNombre] = useState("Sucursal");
-  const [vistaActiva, setVistaActiva] = useState<"venta" | "pedidos">("venta");
+  const [vista, setVista] = useState<Vista>("vender");
+  // Estado del turno para el día operativo actual. Sin turno abierto no se puede vender:
+  // la vista Vender se sustituye por la puerta de apertura (RN-08). "cargando" evita
+  // parpadear la puerta antes de leer la base local. "pendiente" es RN-24: quedó un turno
+  // anterior sin cerrar, así que hoy ni siquiera se puede abrir.
+  const [cajaEstado, setCajaEstado] = useState<"cargando" | "sin_abrir" | "abierto" | "cerrado" | "pendiente">("cargando");
+  const [diasPendientes, setDiasPendientes] = useState<string[]>([]);
+  // Tema claro/oscuro. El valor inicial lo fijó main.tsx en el <html>; aquí solo se
+  // sincroniza el estado para reflejar el botón y persistir el cambio.
+  const [dark, setDark] = useState(() => document.documentElement.dataset.theme === "dark");
   const online = useOnlineStatus();
   const scale = useScale();
 
@@ -135,9 +149,29 @@ export function PantallaPOS() {
     setFolio(nextFolio);
     if (sid) setSucursalId(sid);
     if (snombre) setSucursalNombre(snombre);
-    // Al releer tras un sync no se pisa la categoría que el cajero ya tenía abierta.
-    if (cats.length > 0) setCatActiva((prev) => prev ?? cats[0]!.id);
+    // Arranca en el menú de tipos (mosaico nivel 0). Al releer tras un sync NO se fuerza
+    // una categoría: si el cajero ya abrió una, se respeta; si estaba en el menú, se queda.
   }
+
+  // Relee el estado del turno desde la base local. Se llama al entrar a Vender —incluido el
+  // arranque— y tras abrir el turno, para reflejar de inmediato si ya se puede vender o si
+  // el turno se cerró desde la pestaña Caja.
+  async function refrescarEstadoCaja() {
+    const [e, pendientes] = await Promise.all([getEstadoCaja(), getDiasSinCerrar()]);
+    setDiasPendientes(pendientes.map((a) => a.fechaOperativa));
+
+    if (e.apertura) {
+      setCajaEstado(e.cierre ? "cerrado" : "abierto");
+      return;
+    }
+    // Sin apertura hoy: si arrastra un turno anterior sin cerrar, la puerta no ofrece
+    // abrir — manda a cerrar lo pendiente primero (RN-24).
+    setCajaEstado(pendientes.length > 0 ? "pendiente" : "sin_abrir");
+  }
+
+  useEffect(() => {
+    if (vista === "vender") void refrescarEstadoCaja();
+  }, [vista]);
 
   // Aplica overrides de disponibilidad por NOMBRE de corte (aplica a todos los paquetes)
   const productosConOv = productos.map((p) => ({
@@ -173,12 +207,24 @@ export function PantallaPOS() {
     await guardarOverrides(nuevos);
   }
 
-  const catMap = Object.fromEntries(categorias.map((c) => [c.id, c]));
+  const catMap = Object.fromEntries(categorias.map((c) => [c.id, c])) as Record<string, CategoriaLocal>;
   const prodsDeCat = productosConOv.filter((p) => p.categoriaId === catActiva);
   const catActual = catActiva ? catMap[catActiva] : undefined;
 
-  // Categorías con fotos (placeholder visual)
-  const fotosCategoria = (catActual?.nombre.toLowerCase() ?? "").match(/carne|pollo|prom/);
+  // Cuántos productos tiene cada categoría (se muestra en el mosaico nivel 0).
+  const countByCat: Record<string, number> = {};
+  for (const p of productos) countByCat[p.categoriaId] = (countByCat[p.categoriaId] ?? 0) + 1;
+
+  // Solo se muestran categorías con productos: si una queda vacía (p. ej. "Piezas" tras
+  // mover sus promos a Pollos), no aparece como tile hueco en el mosaico.
+  const categoriasVisibles = categorias.filter((c) => (countByCat[c.id] ?? 0) > 0);
+
+  function toggleTema() {
+    const next = !dark;
+    setDark(next);
+    document.documentElement.dataset.theme = next ? "dark" : "light";
+    localStorage.setItem("pos-theme", next ? "dark" : "light");
+  }
 
   function onClickProducto(producto: ProductoLocal) {
     const cat = catMap[producto.categoriaId];
@@ -209,6 +255,8 @@ export function PantallaPOS() {
       { id: crypto.randomUUID(), producto: { ...producto, precio: precioUnitario }, cantidad, cortes, notas },
     ]);
     setModal(null);
+    // Tras agregar, se regresa al menú de tipos (mosaico nivel 0) para el siguiente producto.
+    setCatActiva(null);
   }
 
   function agregarPollo(producto: ProductoLocal, cantidadPollo: number, notas: string, cantidadPapas: number | null) {
@@ -216,13 +264,17 @@ export function PantallaPOS() {
       { id: crypto.randomUUID(), producto, cantidad: cantidadPollo, cortes: [], notas },
     ];
     if (cantidadPapas !== null) {
-      const extraPapas = productos.find((p) => p.nombre === "Extra Papas");
+      // El seed renombró "Extra Papas" → "Papas Fritas" (orden suelta). Buscar el nombre
+      // viejo dejaba de agregar las papas al pollo.
+      const extraPapas = productos.find((p) => p.nombre === "Papas Fritas");
       if (extraPapas) {
         items.push({ id: crypto.randomUUID(), producto: extraPapas, cantidad: cantidadPapas, cortes: [], notas: "" });
       }
     }
     setBorrador((prev) => [...prev, ...items]);
     setModal(null);
+    // Tras agregar, se regresa al menú de tipos (mosaico nivel 0) para el siguiente producto.
+    setCatActiva(null);
   }
 
   function cambiarCantidad(id: string, delta: number) {
@@ -239,6 +291,17 @@ export function PantallaPOS() {
 
   async function confirmarCobro(metodoPago: MetodoPago, opciones: OpcionesPedido) {
     const { tipoEntrega, clienteId, nombreRecoger, horaRecoger, direccionEntrega, referenciaEntrega } = opciones;
+
+    // Barrera dura: sin turno abierto no se registra la venta. La UI ya sustituye el
+    // catálogo por la puerta de apertura, pero si el turno se cerró mientras el modal de
+    // cobro estaba abierto, esto lo ataja antes de guardar un pedido huérfano que el
+    // servidor rechazaría con DIA_NO_ABIERTO / DIA_YA_CERRADO.
+    const estadoCaja = await getEstadoCaja();
+    if (!estadoCaja.apertura || estadoCaja.cierre) {
+      setModal(null);
+      setCajaEstado(!estadoCaja.apertura ? "sin_abrir" : "cerrado");
+      return;
+    }
 
     // El folio se deriva de los pedidos ya guardados: no hay contador aparte que pueda
     // desviarse de los datos. Ver BD-03.
@@ -328,83 +391,62 @@ export function PantallaPOS() {
           <div className="brand">
             <div className="brand-mark">B</div>
             <span className="brand-name">Las Brasas</span>
-            <span className="brand-sub">{catActual?.nombre ?? ""}</span>
           </div>
+          <div className="chip"><IcoStore size={13} />{sucursalNombre}</div>
           <div className="header-meta">
-            <span style={{ fontSize: 13, color: "var(--text-3)" }}>{fecha}</span>
+            <span style={{ textTransform: "capitalize" }}>{fecha}</span>
             <div className={`chip ${online ? "ok" : "warn"}`}>
               {online ? <IcoOnline size={12} /> : <IcoOffline size={12} />}
-              {online ? "En línea" : "Sin conexión"}
+              {online ? "En línea" : "Sin conexión · operando local"}
             </div>
             <div className="chip">
-              Próximo folio <strong>#{String(folio).padStart(3, "0")}</strong>
+              <span>Folio próximo</span> <strong>#{String(folio).padStart(3, "0")}</strong>
             </div>
-            <button
-              style={{
-                background: "transparent",
-                border: "1px solid var(--border)",
-                color: "var(--text-2)",
-                borderRadius: 8, padding: "6px 12px", fontSize: 13,
-                fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)",
-              }}
-              onClick={() => setModal({ tipo: "disponibilidad" })}
-            >
-              Disponibilidad
+            <button className="hdr-btn" onClick={() => setModal({ tipo: "disponibilidad" })}>
+              <IcoBox size={15} /> Cortes
             </button>
             <button
-              style={{
-                background: "transparent", border: "1px solid var(--border)",
-                color: "var(--text-2)", borderRadius: 8, padding: "6px 12px",
-                fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)",
-              }}
-              onClick={() => setModal({ tipo: "caja" })}
+              className="hdr-btn icon-only"
+              onClick={toggleTema}
+              title={dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro"}
+              aria-label={dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro"}
             >
-              Caja
-            </button>
-            <button
-              style={{
-                background: "transparent",
-                border: "1px solid var(--border)",
-                color: "var(--text-2)",
-                borderRadius: 8, padding: "6px 14px", fontSize: 13,
-                fontWeight: 600, cursor: "pointer", fontFamily: "var(--font)",
-              }}
-              onClick={() => setVistaActiva("pedidos")}
-            >
-              Pedidos →
+              {dark ? <IcoSun size={15} /> : <IcoMoon size={15} />}
             </button>
           </div>
         </header>
 
-        {/* ===== BODY ===== */}
-        <div className="pos-body">
-          {/* Catálogo */}
-          <div className="catalog-pane">
-            <div className="cat-tabs">
-              {categorias.map((c) => (
-                <button key={c.id}
-                  className={`cat-tab ${c.id === catActiva ? "active" : ""}`}
-                  onClick={() => setCatActiva(c.id)}>
-                  {c.nombre}
-                </button>
-              ))}
-            </div>
+        {/* ===== MAIN: nav rail + pantalla activa ===== */}
+        <div className="pos-main">
+          <NavRail vista={vista} onNav={setVista} />
 
-            <div className="cat-scroll">
-              <div className="section-head">
-                <h3>{catActual?.nombre}</h3>
-                <span className="count">{prodsDeCat.length} productos</span>
-              </div>
-
-              <div className="prod-grid">
-                {prodsDeCat.map((prod) => (
-                  <ProductoCard key={prod.id} producto={prod}
-                    conFoto={!!fotosCategoria}
-                    onClick={() => onClickProducto(prod)} />
-                ))}
-              </div>
+          {vista === "vender" && cajaEstado !== "abierto" && (
+            <div className="pos-screen">
+              <GateApertura estado={cajaEstado} pendientes={diasPendientes}
+                onIrACaja={() => setVista("caja")}
+                onAbierto={() => void refrescarEstadoCaja()} />
             </div>
-          </div>
+          )}
+
+          {vista === "vender" && cajaEstado === "abierto" && (
+          <div className="pos-body">
+            {/* Catálogo — mosaico de 2 niveles (tipos → paquetes) */}
+            <div className="catalog-pane">
+              {catActiva !== null && catActual ? (
+                <PackageView
+                  categoria={catActual}
+                  productos={prodsDeCat}
+                  onBack={() => setCatActiva(null)}
+                  onProductClick={onClickProducto}
+                />
+              ) : (
+                <TypeMenu
+                  categorias={categoriasVisibles}
+                  countByCat={countByCat}
+                  onPick={setCatActiva}
+                />
+              )}
+            </div>
 
           {/* Carrito */}
           <div className="cart-pane">
@@ -479,6 +521,19 @@ export function PantallaPOS() {
               </div>
             </div>
           </div>
+          </div>
+          )}
+
+          {vista === "pedidos" && (
+            <div className="pos-screen">
+              <VistaPedidos sucursalId={sucursalId} />
+            </div>
+          )}
+          {vista === "caja" && (
+            <div className="pos-screen">
+              <VistaCaja sucursalNombre={sucursalNombre} />
+            </div>
+          )}
         </div>
 
         {/* ===== MODALES ===== */}
@@ -503,6 +558,7 @@ export function PantallaPOS() {
         {modal?.tipo === "pollo" && (
           <ConfiguradorPollo
             producto={modal.producto}
+            precioPapas={productos.find((p) => p.nombre === "Papas Fritas")?.precio ?? 0}
             onConfirmar={(cantidadPollo, notas, cantidadPapas) =>
               agregarPollo(modal.producto, cantidadPollo, notas, cantidadPapas)}
             onCancelar={() => setModal(null)}
@@ -526,13 +582,6 @@ export function PantallaPOS() {
           />
         )}
 
-        {modal?.tipo === "caja" && (
-          <VistaCaja
-            sucursalNombre={sucursalNombre}
-            onCerrar={() => setModal(null)}
-          />
-        )}
-
         {modal?.tipo === "disponibilidad" && (
           <ConfiguradorDisponibilidad
             cortes={cortesUnicos}
@@ -542,43 +591,143 @@ export function PantallaPOS() {
             onCerrar={() => setModal(null)}
           />
         )}
-
-        {vistaActiva === "pedidos" && (
-          <VistaPedidos
-            sucursalId={sucursalId}
-            sucursalNombre={sucursalNombre}
-            onVolver={() => setVistaActiva("venta")}
-          />
-        )}
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// ProductoCard
+// GateApertura — puerta de entrada a Vender
+//
+// RN-08 / caja offline (BD-19): una venta sin apertura del día queda huérfana (el servidor
+// la rechaza con DIA_NO_ABIERTO y se atasca en la cola). En vez de dejar cobrar y fallar en
+// silencio, se exige abrir el turno ANTES de vender. Reusa `abrirDia` del cajaService.
 // ---------------------------------------------------------------------------
-interface CardProps {
-  producto: ProductoLocal;
-  conFoto: boolean;
-  onClick: () => void;
-}
+function GateApertura({
+  estado, pendientes, onIrACaja, onAbierto,
+}: {
+  estado: "cargando" | "sin_abrir" | "cerrado" | "pendiente";
+  pendientes: string[];
+  onIrACaja: () => void;
+  onAbierto: () => void;
+}) {
+  const [fondo, setFondo] = useState("");
+  const [notas, setNotas] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-function ProductoCard({ producto, conFoto, onClick }: CardProps) {
-  return (
-    <button className="prod-card" onClick={onClick}>
-      {conFoto && (
-        <div className="photo">
-          <span>{producto.nombre.slice(0, 10)}</span>
+  async function abrir() {
+    const n = parseFloat(fondo);
+    if (isNaN(n) || n < 0) { setError("Ingresa un fondo inicial válido (puede ser 0)."); return; }
+    setError(null); setEnviando(true);
+    try {
+      await abrirDia(crypto.randomUUID(), n, notas.trim() || undefined);
+      // La apertura debe llegar al servidor ANTES que las ventas: la cola la envía primero.
+      void sincronizarTodo();
+      onAbierto();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo abrir el turno.");
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  if (estado === "cargando") {
+    return <div className="caja-gate"><div className="muted small">Cargando…</div></div>;
+  }
+
+  if (estado === "cerrado") {
+    return (
+      <div className="caja-gate">
+        <div className="gate-card">
+          <div className="gate-ico cerrado"><IcoLock size={26} /></div>
+          <h1 className="gate-title">Turno cerrado</h1>
+          <p className="gate-sub">
+            El corte de hoy ya se realizó. No se pueden registrar más ventas hasta la
+            siguiente jornada.
+          </p>
         </div>
-      )}
-      <span className="pname">{producto.nombre}</span>
-      {producto.descripcion && <span className="psub">{producto.descripcion}</span>}
-      {!producto.requiereCorte && producto.precio > 0 && (
-        <span className="pprice">
-          {"$" + producto.precio.toLocaleString("es-MX", { minimumFractionDigits: 0 })}
-        </span>
-      )}
-    </button>
+      </div>
+    );
+  }
+
+  // RN-24: arrastra un turno anterior sin cerrar. No se ofrece capturar el fondo porque
+  // `abrirDia` lo va a rechazar de todos modos; se manda a cerrar lo pendiente.
+  if (estado === "pendiente") {
+    return (
+      <div className="caja-gate">
+        <div className="gate-card">
+          <div className="gate-ico cerrado"><IcoLock size={26} /></div>
+          <h1 className="gate-title">
+            {pendientes.length === 1 ? "Turno sin cerrar" : "Turnos sin cerrar"}
+          </h1>
+          <p className="gate-sub">{pendientes.map((f) => fechaOperativaCorta(f)).join(" · ")}</p>
+          <button className="btn primary block" style={{ marginTop: 18 }} onClick={onIrACaja}>
+            <IcoLock size={17} /> Ir a Caja
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="caja-gate">
+      <div className="gate-card">
+        <div className="gate-ico"><IcoPower size={26} /></div>
+        <h1 className="gate-title">Inicio de turno</h1>
+        <p className="gate-sub">Registra el fondo inicial para comenzar a vender.</p>
+        <div className="panel" style={{ marginTop: 18, textAlign: "left" }}>
+          {error && <div className="note-box warn" style={{ marginBottom: 12 }}>{error}</div>}
+          <label className="fld">
+            <span className="fld-lbl">Fondo inicial en caja</span>
+            <div className="fld-box">
+              <IcoBanknote size={17} />
+              <input inputMode="decimal" value={fondo} placeholder="0.00" autoFocus
+                onChange={(e) => setFondo(e.target.value.replace(/[^0-9.]/g, ""))} />
+            </div>
+          </label>
+          <label className="fld">
+            <span className="fld-lbl">Notas (opcional)</span>
+            <div className="fld-box">
+              <input value={notas} placeholder="Ej. fondo reducido por día festivo"
+                onChange={(e) => setNotas(e.target.value)} />
+            </div>
+          </label>
+          <button className="btn primary block" disabled={enviando || !fondo} onClick={() => void abrir()}>
+            <IcoPower size={17} /> {enviando ? "Abriendo…" : "Abrir turno"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// NavRail — barra lateral de navegación (Vender / Pedidos / Caja)
+// ---------------------------------------------------------------------------
+const NAV: { id: Vista; label: string; icon: (p: { size?: number }) => JSX.Element }[] = [
+  { id: "vender", label: "Vender", icon: IcoGrid },
+  { id: "pedidos", label: "Pedidos", icon: IcoReceipt },
+  { id: "caja", label: "Caja", icon: IcoWallet },
+];
+
+function NavRail({ vista, onNav }: { vista: Vista; onNav: (v: Vista) => void }) {
+  return (
+    <nav className="nav-rail">
+      {NAV.map((n) => {
+        const Icono = n.icon;
+        return (
+          <button
+            key={n.id}
+            className={`nav-item ${vista === n.id ? "active" : ""}`}
+            onClick={() => onNav(n.id)}
+          >
+            <span className="nav-ico"><Icono size={22} /></span>
+            <span className="nav-lbl">{n.label}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+

@@ -27,10 +27,19 @@ export interface DatosImpresion {
   referenciaEntrega?: string;
 }
 
+// Datos del ticket de corte. Los usa tanto el CIERRE del turno como un CORTE de control
+// emitido a media jornada (RN-23): el cálculo es el mismo, lo único que cambia es si el
+// turno ya quedó sellado o sigue abierto.
 export interface DatosCierreImpresion {
   sucursal: string;
   fecha: string; // YYYY-MM-DD (fecha local Mazatlán)
+  // Momento en que se emitió este ticket. En un cierre es la hora del cierre; en un corte
+  // parcial, la hora en que se pidió.
   cerradoEn: string; // ISO string
+  // true = corte de control con el turno todavía abierto. El ticket lo dice de forma
+  // visible: si no, dos papeles idénticos —uno parcial y uno definitivo— acabarían
+  // confundiéndose sobre el mostrador.
+  parcial?: boolean;
   fondoInicial: number;
   ventasEfectivo: number;
   ventasTarjeta: number;
@@ -47,8 +56,6 @@ export interface DatosCierreImpresion {
   gastos: { concepto: string; monto: number }[];
   reembolsosEfectivo: number;
   esperadoEnCaja: number;
-  conteoFisico: number;
-  diferencia: number;
   notas?: string;
 }
 

@@ -29,12 +29,19 @@ export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCance
   const [cantidad, setCantidad] = useState(1);
   const [notas, setNotas] = useState("");
 
+  // Solo se muestran los cortes disponibles: los agotados (v.activo === false, que ya
+  // incluye los overrides de disponibilidad aplicados en PantallaPOS) no aparecen.
   const grupos = gruposCorte
     .map((g) => ({
       ...g,
-      variantes: producto.variantes.filter((v) => v.grupoCorteId === g.id),
+      variantes: producto.variantes.filter((v) => v.grupoCorteId === g.id && v.activo),
     }))
     .filter((g) => g.variantes.length > 0);
+
+  // El ancho del modal se ajusta a cuántos grupos disponibles hay: con menos grupos, un
+  // modal de 720px queda vacío. Cada grupo apila su fila de cortes, así que el ancho útil
+  // escala con la cantidad de grupos visibles.
+  const anchoModal = grupos.length >= 3 ? 720 : grupos.length === 2 ? 580 : 440;
 
   const isCutEnabled = (v: VarianteLocal) => {
     if (!v.activo) return false;
@@ -75,7 +82,7 @@ export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCance
 
   return (
     <div className="modal-back" onClick={onCancelar}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" style={{ width: anchoModal }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div>
             <h2>{producto.nombre}</h2>
@@ -105,19 +112,17 @@ export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCance
                   const cls = [
                     "cut-btn",
                     isSel && "selected",
-                    !v.activo && "unavailable",
-                    !enabled && v.activo && "disabled-group",
+                    !enabled && "disabled-group",
                   ].filter(Boolean).join(" ");
 
                   return (
                     <button key={v.id} className={cls}
-                      disabled={!enabled || !v.activo}
+                      disabled={!enabled}
                       onClick={() => toggleCorte(v)}>
                       <span className="nm">{v.nombre}</span>
                       <span className="frac">
                         {isSel ? (propLabel.split(" · ")[0] ?? propLabel) : ""}
                       </span>
-                      {!v.activo && <span className="cut-badge agotado">Agotado</span>}
                     </button>
                   );
                 })}
@@ -126,7 +131,7 @@ export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCance
             );
           })}
 
-          {seleccionados.length > 0 && (
+          {seleccionados.length > 1 && (
             <div className="mix-preview">
               <div className="mix-bar">
                 {seleccionados.map((_, i) => (
@@ -148,7 +153,7 @@ export function ConfiguradorCortes({ producto, gruposCorte, onConfirmar, onCance
             </div>
           )}
 
-          <div className="row-price" style={{ marginTop: seleccionados.length > 0 ? 18 : 14 }}>
+          <div className="row-price" style={{ marginTop: seleccionados.length > 1 ? 18 : 14 }}>
             <label>Cantidad</label>
             <div className="stepper">
               <button onClick={() => setCantidad(Math.max(1, cantidad - 1))}>−</button>

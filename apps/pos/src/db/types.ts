@@ -154,9 +154,9 @@ export interface CierreLocal {
   reembolsosEfectivo: number;
   totalEntradas: number;
   totalGastos: number;
+  // Efectivo que el sistema espera en el cajón (referencia). El conteo físico y la
+  // diferencia se hacen FUERA del sistema y no se registran aquí.
   esperadoEnCaja: number;
-  conteoFisico: number;
-  diferencia: number;
   // Desglose congelado al momento de cerrar. El ticket de corte los lista uno por uno,
   // y tiene que poder reimprimirse idéntico aunque después se toque algo.
   entradas: LineaMovimientoCierre[];

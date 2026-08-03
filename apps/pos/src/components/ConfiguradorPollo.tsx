@@ -4,6 +4,9 @@ import { IcoClose, IcoCheck } from "./Iconos.js";
 
 interface Props {
   producto: ProductoLocal;
+  // Precio unitario del extra "Papas Fritas". El total mostrado en el botón suma el pollo
+  // más las papas, para que el cajero vea lo que realmente va al pedido.
+  precioPapas: number;
   onConfirmar: (cantidadPollo: number, notas: string, cantidadPapas: number | null) => void;
   onCancelar: () => void;
 }
@@ -12,11 +15,14 @@ function fmt(n: number) {
   return "$" + n.toLocaleString("es-MX", { minimumFractionDigits: 0 });
 }
 
-export function ConfiguradorPollo({ producto, onConfirmar, onCancelar }: Props) {
+export function ConfiguradorPollo({ producto, precioPapas, onConfirmar, onCancelar }: Props) {
   const [cantidad, setCantidad] = useState(1);
   const [conPapas, setConPapas] = useState(false);
   const [cantidadPapas, setCantidadPapas] = useState(1);
   const [notas, setNotas] = useState("");
+
+  const subtotalPapas = conPapas ? precioPapas * cantidadPapas : 0;
+  const totalPedido = producto.precio * cantidad + subtotalPapas;
 
   const handleConfirmar = () => {
     onConfirmar(cantidad, notas, conPapas ? cantidadPapas : null);
@@ -78,7 +84,7 @@ export function ConfiguradorPollo({ producto, onConfirmar, onCancelar }: Props) 
                 <div className="v">{cantidadPapas}</div>
                 <button onClick={() => setCantidadPapas(cantidadPapas + 1)}>+</button>
               </div>
-              <div className="total" />
+              <div className="total">{subtotalPapas > 0 ? fmt(subtotalPapas) : ""}</div>
             </div>
           )}
 
@@ -98,7 +104,7 @@ export function ConfiguradorPollo({ producto, onConfirmar, onCancelar }: Props) 
           <button className="btn ghost" onClick={onCancelar}>Cancelar</button>
           <button className="btn primary" onClick={handleConfirmar}>
             <IcoCheck size={18} />
-            Agregar{producto.precio > 0 ? ` · ${fmt(producto.precio * cantidad)}` : ""}
+            Agregar{totalPedido > 0 ? ` · ${fmt(totalPedido)}` : ""}
           </button>
         </div>
       </div>

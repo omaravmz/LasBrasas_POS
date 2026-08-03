@@ -1,3 +1,4 @@
+import type { EstadoPedido } from "@brasas/shared";
 import type {
   CategoriaLocal,
   ProductoLocal,
@@ -52,6 +53,13 @@ export interface LocalDB {
   getMaxFolio(fechaOperativa: string): Promise<number>;
   /** Todos los pedidos de un día de operación. Base del cálculo de ventas offline. */
   getPedidosPorDia(fechaOperativa: string): Promise<PedidoLocal[]>;
+  /**
+   * Actualiza el estado de un pedido en la base local (LISTO / ENTREGADO / CANCELADO).
+   * Mantiene coherente la vista de caja, que lee de local: un pedido entregado deja de ser
+   * cancelable y uno cancelado deja de contar en las ventas (calcularVentas excluye
+   * CANCELADO). No-op si el pedido no existe en esta terminal.
+   */
+  actualizarEstadoPedido(id: string, estado: EstadoPedido): Promise<void>;
 
   // --- Caja (BD-19) ---
   // Abrir el día, registrar movimientos y cerrar deben funcionar sin internet.
@@ -59,6 +67,15 @@ export interface LocalDB {
   guardarApertura(apertura: AperturaLocal): Promise<void>;
   getApertura(fechaOperativa: string): Promise<AperturaLocal | null>;
   getAperturasPendientesSync(): Promise<AperturaLocal[]>;
+  /**
+   * Días con apertura y SIN cierre, anteriores a `anteriorA` ("YYYY-MM-DD"), del más
+   * viejo al más reciente.
+   *
+   * Existe por RN-24: sin cierre automático, un turno que nadie cerró se queda abierto
+   * para siempre — sin corte, y con sus movimientos editables indefinidamente. La
+   * apertura del día siguiente consulta esto y se bloquea si hay algo pendiente.
+   */
+  getDiasSinCerrar(anteriorA: string): Promise<AperturaLocal[]>;
 
   guardarMovimiento(movimiento: MovimientoLocal): Promise<void>;
   /** Movimientos vigentes del día (excluye los marcados como eliminados). */

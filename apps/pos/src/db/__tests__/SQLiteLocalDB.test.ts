@@ -225,6 +225,20 @@ describe("Pedidos", () => {
     const pendientes = await db.getPedidosPendientesSync();
     expect(pendientes.find((p) => p.id === "p1")).toBeUndefined();
   });
+
+  it("actualizarEstadoPedido reescribe el estado en el blob local", async () => {
+    const db = await initDB();
+    await db.guardarPedido(makePedido({ id: "p1" }));
+    await db.actualizarEstadoPedido("p1", EstadoPedido.ENTREGADO);
+    const pedidos = await db.getPedidosPorDia(HOY);
+    expect(pedidos).toHaveLength(1);
+    expect(pedidos[0]!.estado).toBe(EstadoPedido.ENTREGADO);
+  });
+
+  it("actualizarEstadoPedido de un id inexistente es no-op y no lanza", async () => {
+    const db = await initDB();
+    await expect(db.actualizarEstadoPedido("no-existe", EstadoPedido.CANCELADO)).resolves.toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

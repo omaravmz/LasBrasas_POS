@@ -3,7 +3,6 @@ import { SQLiteLocalDB } from "../impl/SQLiteLocalDB.js";
 import {
   calcularVentas,
   calcularEsperadoEnCaja,
-  calcularDiferencia,
   EstadoPedido,
   MetodoPago,
   OrigenPedido,
@@ -87,6 +86,50 @@ describe("Apertura local", () => {
   });
 });
 
+// RN-24. La consulta que detecta turnos olvidados: apertura sin su cierre.
+describe("Días sin cerrar", () => {
+  const aperturaAyer: AperturaLocal = { ...apertura, id: "ap-ayer", fechaOperativa: AYER };
+
+  it("encuentra la apertura de ayer que no tiene cierre", async () => {
+    const db = await initDB();
+    await db.guardarApertura(aperturaAyer);
+
+    const abiertos = await db.getDiasSinCerrar(HOY);
+    expect(abiertos.map((a) => a.fechaOperativa)).toEqual([AYER]);
+  });
+
+  it("ignora la apertura del propio día consultado", async () => {
+    const db = await initDB();
+    await db.guardarApertura(apertura); // HOY
+
+    expect(await db.getDiasSinCerrar(HOY)).toHaveLength(0);
+  });
+
+  it("ignora los días que sí tienen cierre", async () => {
+    const db = await initDB();
+    await db.guardarApertura(aperturaAyer);
+    await db.guardarCierre({
+      id: "ci-ayer",
+      fechaOperativa: AYER,
+      fondoInicial: 500,
+      ventasEfectivo: 0,
+      ventasTarjeta: 0,
+      ventasTransfer: 0,
+      totalVentas: 0,
+      reembolsosEfectivo: 0,
+      totalEntradas: 0,
+      totalGastos: 0,
+      esperadoEnCaja: 500,
+      entradas: [],
+      gastos: [],
+      cerradoEn: new Date().toISOString(),
+      sincronizado: false,
+    });
+
+    expect(await db.getDiasSinCerrar(HOY)).toHaveLength(0);
+  });
+});
+
 describe("Movimientos de caja locales", () => {
   it("se listan en orden cronológico", async () => {
     const db = await initDB();
@@ -150,11 +193,6 @@ describe("Conciliación (fórmula compartida con el backend)", () => {
     expect(calcularEsperadoEnCaja(500, ventas.ventasEfectivo, 0, 0)).toBe(500);
   });
 
-  it("la diferencia es conteo físico menos esperado", () => {
-    expect(calcularDiferencia(1745, 1750)).toBe(-5); // faltante
-    expect(calcularDiferencia(1755, 1750)).toBe(5);  // sobrante
-  });
-
   it("no arrastra error de punto flotante", () => {
     // 19.90 x 3 en flotante da 59.699999999999996.
     const ventas = calcularVentas([
@@ -216,13 +254,12 @@ describe("Jornada completa sin conexión", () => {
 
     // Esperado: 500 (fondo) + 500 (efectivo) + 100 (entrada) - 50 (gasto) = 1050.
     // La tarjeta NO entra: no es efectivo en el cajón.
+    // El conteo físico y su diferencia se hacen fuera del sistema; el corte solo deja el
+    // esperado en caja como referencia.
     const esperado = calcularEsperadoEnCaja(apertura.fondoInicial, ventas.ventasEfectivo, entradas, gastos);
     expect(esperado).toBe(1050);
 
-    // 5. El encargado cuenta $1040: faltan $10.
-    expect(calcularDiferencia(1040, esperado)).toBe(-10);
-
-    // 6. Todo quedó encolado para sincronizar, en el orden correcto.
+    // 5. Todo quedó encolado para sincronizar, en el orden correcto.
     expect(await db.getAperturasPendientesSync()).toHaveLength(1);
     expect(await db.getPedidosPendientesSync()).toHaveLength(3);
     expect(await db.getMovimientosPendientesSync()).toHaveLength(2);

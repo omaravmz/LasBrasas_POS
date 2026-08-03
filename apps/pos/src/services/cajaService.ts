@@ -1,6 +1,5 @@
 import {
   calcularEsperadoEnCaja,
-  calcularDiferencia,
   calcularVentas,
   TipoMovimientoCaja,
   type ResumenVentas,
@@ -143,6 +142,31 @@ export async function getVentasDia(fecha = diaOperativo()): Promise<VentasDia> {
 // Operaciones — se escriben en local y se encolan para sincronizar
 // ---------------------------------------------------------------------------
 
+// RN-24: hay al menos un día anterior con apertura y sin cierre. No es un fallo técnico
+// sino una condición de la operación, y la interfaz necesita saber QUÉ días son para
+// ofrecer cerrarlos — de ahí el tipo propio en vez de un Error suelto.
+export class DiasSinCerrarError extends Error {
+  readonly fechas: string[];
+
+  constructor(fechas: string[]) {
+    const lista = fechas.join(", ");
+    super(
+      fechas.length === 1
+        ? `El turno del ${lista} quedó sin cerrar. Ciérralo antes de abrir uno nuevo.`
+        : `Hay turnos sin cerrar (${lista}). Ciérralos antes de abrir uno nuevo.`,
+    );
+    this.name = "DiasSinCerrarError";
+    this.fechas = fechas;
+  }
+}
+
+// Días con apertura y sin cierre anteriores a `fecha`. La interfaz los usa para avisar y
+// para ofrecer el cierre pendiente; `abrirDia` los usa para bloquear.
+export async function getDiasSinCerrar(fecha = diaOperativo()): Promise<AperturaLocal[]> {
+  const db = await getLocalDB();
+  return db.getDiasSinCerrar(fecha);
+}
+
 export async function abrirDia(
   id: string,
   fondoInicial: number,
@@ -154,6 +178,20 @@ export async function abrirDia(
   // RN-08: una sola apertura por día.
   if (await db.getApertura(fecha)) {
     throw new Error("El día ya está abierto");
+  }
+
+  // RN-24: no se abre un día nuevo arrastrando uno anterior sin cerrar. No hay cierre
+  // automático a propósito: cerrar solo un día que nadie contó produce un corte sin
+  // validar con apariencia de bueno. Ver CONTEXT.md §7.7.
+  //
+  // El candado vive aquí, en la terminal, y NO en el servidor. El servidor no puede
+  // aplicarlo: la cola de sync manda todas las aperturas antes que los cierres (RN-19),
+  // así que la apertura de hoy llega a la nube antes que el cierre de ayer y la rechazaría
+  // en falso, atascando la cola. La integridad de los datos ya la garantiza RN-08 con su
+  // índice único; esto de aquí es un candado sobre el flujo de trabajo del encargado.
+  const pendientes = await db.getDiasSinCerrar(fecha);
+  if (pendientes.length > 0) {
+    throw new DiasSinCerrarError(pendientes.map((a) => a.fechaOperativa));
   }
 
   await db.guardarApertura({
@@ -204,17 +242,23 @@ export async function eliminarMovimiento(id: string): Promise<void> {
 // Cierra el día con los números que la terminal ve AHORA. Ese es el cálculo que se imprime
 // en el ticket de corte y que el encargado firma, así que se guarda como snapshot: debe
 // poder reproducirse tal cual, aunque después algo cambie en la nube.
+//
+// El conteo físico del efectivo y su diferencia NO se registran: se hacen fuera del
+// sistema. El cierre solo deja el esperado en caja como referencia.
+//
+// `fecha` es explícita porque el cierre ya no es forzosamente el del día en curso: un
+// turno que quedó abierto ayer se cierra desde la terminal de hoy (RN-24). Antes esto
+// estaba fijo en `diaOperativo()` y por eso un día sin cerrar era irrecuperable.
 export async function cerrarDia(
   id: string,
-  conteoFisico: number,
+  fecha = diaOperativo(),
   notas?: string,
 ): Promise<CierreLocal> {
   const db = await getLocalDB();
-  const fecha = diaOperativo();
 
   const estado = await getEstadoCaja(fecha);
 
-  if (!estado.apertura) throw new Error("No hay apertura de caja para hoy");
+  if (!estado.apertura) throw new Error(`No hay apertura de caja para el ${fecha}`);
   if (estado.cierre) throw new Error("El día ya está cerrado");
 
   const ventas = estado.ventasDelDia!;
@@ -240,8 +284,6 @@ export async function cerrarDia(
     totalEntradas: estado.totalesMovimientos.entradas,
     totalGastos: estado.totalesMovimientos.gastos,
     esperadoEnCaja,
-    conteoFisico,
-    diferencia: calcularDiferencia(conteoFisico, esperadoEnCaja),
     ...(notas !== undefined && { notas }),
     cerradoEn: new Date().toISOString(),
     sincronizado: false,
