@@ -104,7 +104,8 @@ async function main() {
   // ---------------------------------------------------------------------------
   const catCarneAsada = await upsertCategoria("Carne Asada", 1);
   const catPollos = await upsertCategoria("Pollos", 2);
-  const catPiezas = await upsertCategoria("Piezas", 3);
+  // Las promos por piezas (4 y 8 piezas) viven dentro de "Pollos": el negocio las presenta
+  // como parte del apartado de pollo, no como una categoría aparte.
   const catOtros = await upsertCategoria("Otros", 4);
   const catExtras = await upsertCategoria("Extras", 5);
   const catBebidas = await upsertCategoria("Bebidas", 6);
@@ -372,20 +373,22 @@ async function main() {
   console.log("✓ Productos y recetas: Pollos");
 
   // ---------------------------------------------------------------------------
-  // Productos — Piezas (pierna y muslo)
+  // Productos — Piezas (pierna y muslo). Van dentro del apartado "Pollos"; se ordenan
+  // después de los paquetes de pollo (orden 5 y 6). El id conserva el sufijo `idn` para no
+  // romper filas ya sembradas; el `update` mueve las existentes a la categoría de Pollos.
   // ---------------------------------------------------------------------------
   const paquetesPiezas = [
-    { nombre: "8 Piezas", fraccion: 1.0, tortillas: 0.5, papas: 350, sopa: 0.5, precio: 260, orden: 1 },
-    { nombre: "4 Piezas", fraccion: 0.5, tortillas: 0.5, papas: 175, sopa: 0.25, precio: 130, orden: 2 },
+    { idn: 1, nombre: "8 Piezas", fraccion: 1.0, tortillas: 0.5, papas: 350, sopa: 0.5, precio: 260, orden: 5 },
+    { idn: 2, nombre: "4 Piezas", fraccion: 0.5, tortillas: 0.5, papas: 175, sopa: 0.25, precio: 130, orden: 6 },
   ];
 
   for (const paquete of paquetesPiezas) {
     const producto = await prisma.producto.upsert({
-      where: { id: `prod-piezas-${paquete.orden}-0000-0000-0000-000000000000` },
-      update: { precio: paquete.precio },
+      where: { id: `prod-piezas-${paquete.idn}-0000-0000-0000-000000000000` },
+      update: { precio: paquete.precio, categoriaId: catPollos.id, orden: paquete.orden },
       create: {
-        id: `prod-piezas-${paquete.orden}-0000-0000-0000-000000000000`,
-        categoriaId: catPiezas.id,
+        id: `prod-piezas-${paquete.idn}-0000-0000-0000-000000000000`,
+        categoriaId: catPollos.id,
         nombre: paquete.nombre,
         precio: paquete.precio,
         orden: paquete.orden,
@@ -398,22 +401,22 @@ async function main() {
     // gramos, las papas ya están en gramos, y la sopa pasa de litros a mililitros.
     const ingredientes = [
       {
-        id: `ing-piezas-${paquete.orden}`,
+        id: `ing-piezas-${paquete.idn}`,
         insumo: "Paquete Piezas Asado",
         cantidad: aUnidadBase(paquete.fraccion, Unidad.PIEZA),
       },
       {
-        id: `ing-tort-piezas-${paquete.orden}`,
+        id: `ing-tort-piezas-${paquete.idn}`,
         insumo: "Tortillas",
         cantidad: aUnidadBase(paquete.tortillas, Unidad.KG),
       },
       {
-        id: `ing-papas-piezas-${paquete.orden}`,
+        id: `ing-papas-piezas-${paquete.idn}`,
         insumo: "Papas a la Francesa",
         cantidad: aUnidadBase(paquete.papas, Unidad.GR),
       },
       {
-        id: `ing-sopa-piezas-${paquete.orden}`,
+        id: `ing-sopa-piezas-${paquete.idn}`,
         insumo: "Sopa Fría",
         cantidad: aUnidadBase(paquete.sopa, Unidad.LT),
       },
