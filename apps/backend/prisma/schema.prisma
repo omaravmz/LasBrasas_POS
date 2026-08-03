@@ -650,8 +650,6 @@ model CierreDia {
   ventasTransfer     Decimal  @db.Decimal(10, 2)
   totalVentas        Decimal  @db.Decimal(10, 2)
   reembolsosEfectivo Decimal  @default(0) @db.Decimal(10, 2)
-  conteoFisico       Decimal  @db.Decimal(10, 2)
-  diferencia         Decimal  @db.Decimal(10, 2)
   mermaPollo         Int?
   notas              String?
   cerradoEn          DateTime @default(now()) @db.Timestamptz(3)

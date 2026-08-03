@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { calcularEsperadoEnCaja, calcularDiferencia } from "@brasas/shared";
+import { calcularEsperadoEnCaja } from "@brasas/shared";
 import type { EstadoPedido, MetodoPago, TipoMovimientoCaja } from "@prisma/client";
 
 // El día de operación ya NO se deriva del reloj ni del timestamp de los pedidos.
@@ -68,9 +68,9 @@ export interface CierreInfo {
   reembolsosEfectivo: number;
   totalEntradas: number;
   totalGastos: number;
+  // Efectivo esperado en el cajón (referencia). El conteo físico y su diferencia se hacen
+  // FUERA del sistema; no se registran.
   esperadoEnCaja: number;
-  conteoFisico: number;
-  diferencia: number;
   gastos: { id: string; concepto: string; monto: number }[];
   entradas: { id: string; concepto: string; monto: number }[];
   notas: string | null;
@@ -416,7 +416,6 @@ export interface CerrarDiaInput {
   sucursalId: string;
   // Día de operación que se cierra, estampado por la terminal.
   fecha: string;
-  conteoFisico: number;
   notas?: string;
 }
 
@@ -435,8 +434,6 @@ interface CierreRow {
   ventasTransfer: { toNumber(): number };
   totalVentas: { toNumber(): number };
   reembolsosEfectivo: { toNumber(): number };
-  conteoFisico: { toNumber(): number };
-  diferencia: { toNumber(): number };
   notas: string | null;
   cerradoEn: Date;
   // Los movimientos que este cierre selló. Ya no hay copias en otras tablas: el desglose
@@ -479,8 +476,6 @@ function mapearCierre(cierre: CierreRow): CierreInfo {
       totalEntradas,
       totalGastos,
     ),
-    conteoFisico: cierre.conteoFisico.toNumber(),
-    diferencia: cierre.diferencia.toNumber(),
     gastos,
     entradas,
     notas: cierre.notas,
@@ -513,21 +508,12 @@ export async function cerrarDia(input: CerrarDiaInput): Promise<CierreInfo> {
     throw new AppError("CONFLICT", "Ya existe un cierre para ese día", 409);
   }
 
-  const [ventas, movimientos] = await Promise.all([
-    calcularVentasDia(input.sucursalId, fecha),
-    listarMovimientos(input.sucursalId, fecha),
-  ]);
-
-  const totales = totalizarMovimientos(movimientos);
+  const ventas = await calcularVentasDia(input.sucursalId, fecha);
   const fondoInicial = apertura.fondoInicial.toNumber();
 
-  const esperadoEnCaja = calcularEsperadoEnCaja(
-    fondoInicial,
-    ventas.ventasEfectivo,
-    totales.entradas,
-    totales.gastos,
-  );
-  const diferencia = calcularDiferencia(input.conteoFisico, esperadoEnCaja);
+  // El efectivo esperado no se persiste: se deriva al leer el cierre (mapearCierre), a
+  // partir del fondo, las ventas en efectivo y los movimientos sellados. El conteo físico
+  // y su diferencia se hacen fuera del sistema y no se guardan.
 
   // El cierre SELLA los movimientos del día en vez de copiarlos a otras tablas.
   //
@@ -550,8 +536,6 @@ export async function cerrarDia(input: CerrarDiaInput): Promise<CierreInfo> {
         ventasTransfer: ventas.ventasTransfer,
         totalVentas: ventas.totalVentas,
         reembolsosEfectivo: ventas.reembolsosEfectivo,
-        conteoFisico: input.conteoFisico,
-        diferencia,
         ...(input.notas !== undefined && { notas: input.notas }),
       },
     });

@@ -43,7 +43,7 @@ export async function postDevImprimirCierre(
     }
 
     const datos = req.body as DatosTicketCierre;
-    if (!datos.fecha || !datos.sucursal || datos.conteoFisico == null) {
+    if (!datos.fecha || !datos.sucursal || datos.esperadoEnCaja == null) {
       throw new AppError("VALIDATION_ERROR", "DatosTicketCierre inválidos", 400);
     }
 

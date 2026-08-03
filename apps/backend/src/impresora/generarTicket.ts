@@ -152,12 +152,16 @@ export function generarTicketCliente(datos: DatosTicket): string[] {
 export function generarTicketCierre(datos: DatosTicketCierre): string[] {
   const lineas: string[] = [];
 
-  // Encabezado
+  // Encabezado. Un corte parcial y un cierre producen el mismo papel salvo por esto:
+  // hay que poder distinguirlos de un vistazo sobre el mostrador.
   lineas.push(centrar("LAS BRASAS"));
-  lineas.push(centrar("CORTE DE CAJA"));
+  lineas.push(centrar(datos.parcial ? "CORTE PARCIAL" : "CORTE DE CAJA"));
   lineas.push(separador("="));
   lineas.push(columnas(`Sucursal: ${datos.sucursal}`, formatearFechaCorta(datos.fecha)));
-  lineas.push(columnas("Cerrado:", formatearHora(datos.cerradoEn)));
+  lineas.push(columnas(datos.parcial ? "Emitido:" : "Cerrado:", formatearHora(datos.cerradoEn)));
+  if (datos.parcial) {
+    lineas.push(centrar("TURNO ABIERTO - NO ES EL CORTE FINAL"));
+  }
   lineas.push(separador("="));
 
   // Ventas del día
@@ -211,21 +215,9 @@ export function generarTicketCierre(datos: DatosTicketCierre): string[] {
   lineas.push(columnas("EN TERMINAL:", formatearPrecio(enTerminal)));
   lineas.push(separador());
 
-  // Conciliación
-  lineas.push(centrar("CONCILIACION"));
-  lineas.push(separador());
-  lineas.push(columnas("Esperado en caja:", formatearPrecio(datos.esperadoEnCaja)));
-  lineas.push(columnas("Conteo fisico:", formatearPrecio(datos.conteoFisico)));
-
-  const etiquetaDif =
-    datos.diferencia === 0 ? "CUADRA" : datos.diferencia > 0 ? "SOBRA" : "FALTA";
-  const signo = datos.diferencia > 0 ? "+" : datos.diferencia < 0 ? "-" : "";
-  lineas.push(
-    columnas(
-      `DIFERENCIA (${etiquetaDif}):`,
-      `${signo}${formatearPrecio(Math.abs(datos.diferencia))}`
-    )
-  );
+  // El conteo físico del efectivo y su diferencia se hacen FUERA del sistema. El corte
+  // solo reporta el esperado en caja (ver seccion CAJA, arriba) como referencia.
+  lineas.push(centrar("Conteo de efectivo: externo"));
   lineas.push(separador());
 
   // Reembolsos (informativo; no afecta el esperado, ver services/caja.ts)
@@ -265,7 +257,7 @@ export function generarTicketCierre(datos: DatosTicketCierre): string[] {
   }
 
   lineas.push(separador("="));
-  lineas.push(centrar("Fin del corte"));
+  lineas.push(centrar(datos.parcial ? "Fin del corte parcial" : "Fin del corte"));
 
   return lineas;
 }

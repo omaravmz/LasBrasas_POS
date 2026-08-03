@@ -170,26 +170,20 @@ export async function postCierre(
 ): Promise<void> {
   try {
     const { sucursalId } = req.dispositivo!;
-    const { id, fecha, conteoFisico, notas } = req.body as {
+    const { id, fecha, notas } = req.body as {
       id: string;
       fecha: string;
-      conteoFisico: number;
       notas?: string;
     };
 
-    if (!id || conteoFisico == null || typeof conteoFisico !== "number" || conteoFisico < 0) {
-      throw new AppError(
-        "VALIDATION_ERROR",
-        "Los campos id y conteoFisico (número ≥ 0) son requeridos",
-        400,
-      );
+    if (!id) {
+      throw new AppError("VALIDATION_ERROR", "El campo id es requerido", 400);
     }
 
     const cierre = await cerrarDia({
       id,
       sucursalId,
       fecha: fechaRequerida(fecha),
-      conteoFisico,
       ...(notas !== undefined && { notas }),
     });
 

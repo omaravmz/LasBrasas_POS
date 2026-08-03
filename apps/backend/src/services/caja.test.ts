@@ -59,11 +59,4 @@ describe("calcularEsperadoEnCaja", () => {
     const ventasEfectivoTrasCancelar = 0;
     expect(calcularEsperadoEnCaja(500, ventasEfectivoTrasCancelar, 0, 0)).toBe(500);
   });
-
-  it("la diferencia es la resta entre conteo físico y esperado", () => {
-    const esperado = calcularEsperadoEnCaja(500, 1200, 200, 200); // 1700
-    expect(1690 - esperado).toBe(-10); // falta
-    expect(1750 - esperado).toBe(50); // sobra
-    expect(1700 - esperado).toBe(0); // cuadra
-  });
 });

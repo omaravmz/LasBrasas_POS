@@ -141,9 +141,37 @@ const cierreEjemplo: DatosTicketCierre = {
   reembolsosEfectivo: 0,
   // 500 + 1200 + 200 - 200 = 1700
   esperadoEnCaja: 1700,
-  conteoFisico: 1690,
-  diferencia: -10,
 };
+
+// RN-23: el corte parcial y el cierre usan la misma plantilla. Lo único que los separa es
+// el encabezado, y tiene que bastar para no confundir dos papeles casi idénticos.
+describe("generarTicketCierre — corte parcial vs. cierre", () => {
+  it("el cierre se titula CORTE DE CAJA y reporta la hora de cierre", () => {
+    const texto = generarTicketCierre(cierreEjemplo).join("\n");
+    expect(texto).toContain("CORTE DE CAJA");
+    expect(texto).toContain("Cerrado:");
+    expect(texto).not.toContain("CORTE PARCIAL");
+    expect(texto).not.toContain("TURNO ABIERTO");
+  });
+
+  it("el corte parcial se identifica y avisa que no es el final", () => {
+    const texto = generarTicketCierre({ ...cierreEjemplo, parcial: true }).join("\n");
+    expect(texto).toContain("CORTE PARCIAL");
+    expect(texto).toContain("TURNO ABIERTO - NO ES EL CORTE FINAL");
+    expect(texto).toContain("Emitido:");
+    expect(texto).toContain("Fin del corte parcial");
+  });
+
+  it("los números son los mismos en ambos", () => {
+    const cierre = generarTicketCierre(cierreEjemplo).join("\n");
+    const parcial = generarTicketCierre({ ...cierreEjemplo, parcial: true }).join("\n");
+
+    for (const dato of ["$2150.00", "ESPERADO EN CAJA:", "$1700.00", "TOTAL GASTOS:"]) {
+      expect(cierre).toContain(dato);
+      expect(parcial).toContain(dato);
+    }
+  });
+});
 
 describe("generarTicketCierre", () => {
   it("muestra las ventas por método de pago", () => {
@@ -185,31 +213,13 @@ describe("generarTicketCierre", () => {
     expect(texto).toContain("$950.00");
   });
 
-  it("marca la diferencia como FALTA cuando el conteo es menor", () => {
+  it("no imprime conteo físico ni diferencia: el conteo de efectivo es externo", () => {
     const texto = generarTicketCierre(cierreEjemplo).join("\n");
-    expect(texto).toContain("DIFERENCIA (FALTA)");
-    // El signo va antes del símbolo de peso: -$10.00, no $-10.00
-    expect(texto).toContain("-$10.00");
-    expect(texto).not.toContain("$-10.00");
-  });
-
-  it("marca la diferencia como CUADRA cuando no hay diferencia", () => {
-    const texto = generarTicketCierre({
-      ...cierreEjemplo,
-      conteoFisico: 1700,
-      diferencia: 0,
-    }).join("\n");
-    expect(texto).toContain("DIFERENCIA (CUADRA)");
-  });
-
-  it("marca la diferencia como SOBRA cuando el conteo es mayor", () => {
-    const texto = generarTicketCierre({
-      ...cierreEjemplo,
-      conteoFisico: 1750,
-      diferencia: 50,
-    }).join("\n");
-    expect(texto).toContain("DIFERENCIA (SOBRA)");
-    expect(texto).toContain("+$50.00");
+    expect(texto).not.toContain("DIFERENCIA");
+    expect(texto).not.toContain("Conteo fisico");
+    expect(texto).toContain("Conteo de efectivo: externo");
+    // El esperado en caja sí se conserva como referencia.
+    expect(texto).toContain("ESPERADO EN CAJA:");
   });
 
   it("lista los pedidos con su folio y monto", () => {
